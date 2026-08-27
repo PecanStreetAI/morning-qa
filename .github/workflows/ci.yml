@@ -50,7 +50,10 @@ jobs:
           pip install detect-secrets==1.5.0
           # --all-files: no baseline exists on purpose — this tree must
           # contain zero secrets, so any hit is a failure, not drift.
-          detect-secrets scan --all-files > /tmp/ds.json
+          # .git/ is excluded: FETCH_HEAD's commit SHA reads as a
+          # hex-entropy finding (bit on the repo's very first CI run —
+          # the pre-init staging scans never had a .git dir to trip on).
+          detect-secrets scan --all-files --exclude-files '^\.git/' > /tmp/ds.json
           python - <<'PY'
           import json, sys
           results = json.load(open('/tmp/ds.json'))['results']
