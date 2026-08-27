@@ -21,7 +21,7 @@ How the two codebases relate:
 * **`scripts/denylist_scan.sh` is the sanitization backstop.** Every port runs
   it before publishing. If you find something in this repo that looks like it
   escaped sanitization, please report it privately rather than opening a public
-  issue with the details.
+  issue with the details — [SECURITY.md](SECURITY.md) has the channel.
 * **Contributions are welcome — and reviewed as untrusted input.** This is a
   framework whose output an operator is asked to trust every morning, so PRs get
   the same skeptical read this framework applies to its own probes: check specs
