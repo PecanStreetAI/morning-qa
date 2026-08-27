@@ -1,0 +1,892 @@
+name: Morning QA
+
+# Scheduled QA pass.  See the framework docs (docs/design.md +
+# docs/check_catalog.md) for the design and the check roster.
+#
+# Tier 1 (Observer) — the agent reads, never writes.  Enforced
+# mechanically by --disallowed-tools + --strict-mcp-config below
+# (--allowed-tools only PRE-APPROVES — it does not restrict; see the
+# comment at the invocation step): Read + read-only Bash + WebFetch +
+# a handful of read-only Mongo MCP verbs pre-approved; Edit, Write,
+# and destructive git/gh commands blocked.
+#
+# Promotion to higher tiers requires editing docs/promotion_criteria.md
+# AND this workflow's --allowed-tools list, in lockstep.  Don't change
+# one without the other.
+#
+# ── Why two jobs ─────────────────────────────────────────────────────
+# The workflow is deliberately split into two jobs (2026-06-10, after a
+# run failed end-to-end when issue-posting tooling was missing on the
+# runner that ran the agent).  Two distinct concerns get distinct jobs:
+#
+#   * run-qa      Claude agent + read-only Mongo MCP gate → writes
+#                 /tmp/qa-report.md → uploads it as an artifact.
+#                 NO `gh` CLI work happens here.
+#   * post-issue  (always ubuntu-latest, which ships `gh`):  downloads
+#                 the artifact → runs the label-create / issue-create /
+#                 supersede / verify chain.  Uses `if: always()` so the
+#                 issue still posts even when run-qa fails — the "agent
+#                 produced no report" fallback body uploads from run-qa
+#                 regardless of its claude-step exit code, and a
+#                 no-artifact-at-all day gets a synthesized 🔴 body.
+#
+# The split is what makes the daily issue unconditional: the one thing
+# this workflow exists to produce (a report, even a report of its own
+# failure) does not depend on the health of the job that produces the
+# report.  It also keeps the door open to running run-qa on a
+# self-hosted runner (see the runs-on note below) without caring
+# whether that box has `gh` installed.
+
+on:
+  schedule:
+    # 10:00 UTC daily.  In the originating deployment this landed ~3h
+    # after the daily data-ingest cron (07:00 UTC) — schedule yours
+    # downstream of whatever the checks observe.  Times in `cron` are
+    # ALWAYS UTC on GitHub Actions.
+    - cron: '0 10 * * *'
+  workflow_dispatch:
+    # Manual trigger for tuning / dry runs.
+
+permissions:
+  # The workflow writes ONE thing: a daily GitHub Issue.  Nothing else.
+  contents: read
+  issues:   write
+
+concurrency:
+  # Never run two morning-QA jobs at once — if the cron fires while
+  # a manual dispatch is in flight, queue rather than parallelize.
+  group: morning-qa
+  cancel-in-progress: false
+
+jobs:
+  # ── JOB 1 — Run the QA agent ───────────────────────────────────────────
+  run-qa:
+    # Default: a hosted runner.  A SELF-HOSTED variant is possible and is
+    # how the originating deployment ran — useful when your database only
+    # accepts connections from an allowlisted egress IP (the runner's
+    # Elastic IP goes on the allowlist and the read-only Mongo MCP can
+    # reach the cluster without opening it to the world).  If you go
+    # self-hosted, keep post-issue on ubuntu-latest (it needs `gh`), and
+    # note the stale-/tmp and PATH caveats flagged in the steps below.
+    runs-on: ubuntu-latest
+    # Hard cap — a killed run produces NO report (learned 2026-07-15: the
+    # agent step ran past the then-20-min cap, GH cancelled it, and the
+    # empty artifact tripped the critical "no report" fallback).  Bumped
+    # 20→30 when the full 16-check roster in the originating deployment
+    # crept to ~20 min/day.  This template ships a 3-check starter roster
+    # (Checks 0, 7, 9) that runs far shorter — 30 still works as a real
+    # "something is wrong" ceiling; tighten it once you know your baseline.
+    timeout-minutes: 30
+
+    steps:
+      - name: Clean stale workspace artifacts
+        # A no-op on hosted runners (fresh ephemeral VM each run), but
+        # LOAD-BEARING on the self-hosted variant, where /tmp persists
+        # between runs.  Without this, a previous run's /tmp/qa-report.md
+        # would still be on disk; if today's Claude invocation crashed
+        # before writing a fresh report, the "report missing" fallback
+        # below wouldn't trip and yesterday's report would silently be
+        # uploaded as today's.
+        #
+        # /tmp/qa-precompute (bundle + raw/ responses, written by the
+        # pre-compute step below) is the SAME stale-artifact class: if
+        # today's pre-compute crashes before rewriting it, the agent must
+        # not read yesterday's bundle as today's.  rm -rf handles both
+        # the files and the dir.
+        run: rm -rf /tmp/qa-report.md /tmp/claude-stdout.log /tmp/qa-precompute
+
+      - name: Checkout repo
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        # Default depth is fine for the starter roster.  If you add a
+        # check that scans recent git history (e.g. a daily diff review),
+        # set fetch-depth deep enough to cover its window.
+
+      - name: Setup Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install Python deps
+        # Adjust the requirements path to your repo layout.  Installing
+        # the app's own deps lets Check 7 (deps + security) audit the
+        # real resolved environment, not just a lockfile.
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r backend/requirements.txt
+          # msgpack: pip-audit's OWN transitive (pip-audit → CacheControl →
+          # msgpack) — NOT an app dep, so Check 7 was flagging the audit
+          # tool's own environment for CVE-2026-57585 (OOB read on Unpacker
+          # reuse; fixed in 1.2.1; surfaced as a 2026-07 morning-QA
+          # Warning).  Pin it HERE, where the package actually comes from —
+          # adding it to the app requirements would install an unused
+          # package into prod just to quiet the audit.  EXACT pin, not a
+          # >= floor: msgpack builds a C extension, and a floor re-resolves
+          # to latest daily — a fresh release whose wheel lags its sdist
+          # would force a source build on the runner (a wheel-race class
+          # this workflow hit in 2026-06).  When a future msgpack CVE
+          # lands, Check 7 flags it and the pin gets bumped deliberately —
+          # same lifecycle as the pip-audit pin.
+          pip install 'pip-audit==2.10.1' 'msgpack==1.2.1'  # for Check 7 — BOTH exact-pinned (wheel-race guard)
+          # Check 7 calls the bare `pip-audit` command, but the QA agent's
+          # Bash tool initializes from the user profile — so setup-python's
+          # tool-cache bin ($pythonLocation/bin, where the pip-audit console
+          # script lands) may NOT be on the agent's PATH, and `pip-audit`
+          # returned "not found" every run despite the install above (two
+          # 2026-06 Check-7 Warnings before this was diagnosed).  Symlink
+          # the binary into /usr/local/bin (on the default profile PATH the
+          # agent's shell sees) so Check 7 actually runs the CVE scan.
+          # Non-fatal by design: a sudo/symlink hiccup must never take the
+          # daily observer dark — Check 7 then just falls back to its
+          # documented "pip-audit unavailable" Warning.  `sudo -n` = never
+          # prompt: if the runner user lacks NOPASSWD sudo, fail fast
+          # (caught by the `|| echo`) instead of relying on no-TTY behavior.
+          sudo -n ln -sf "$pythonLocation/bin/pip-audit" /usr/local/bin/pip-audit 2>/dev/null \
+            && echo "pip-audit linked -> /usr/local/bin/pip-audit ($(pip-audit --version 2>&1 | head -1))" \
+            || echo "WARN: could not link pip-audit into /usr/local/bin; Check 7 backend scan may stay blind"
+
+      - name: Setup Node
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install frontend deps
+        # Serves the npm half of Check 7's dependency audit.  Adjust the
+        # path to your frontend, or drop this + the Setup Node step if
+        # your repo has no Node surface (Check 7 self-skips that half).
+        run: cd frontend && npm ci
+
+      - name: Install Claude Code CLI
+        # EXACT pin, not a floating install — this is the daily-latest
+        # exfiltration channel (flagged in a 2026-07-23 review; low
+        # severity, pre-existing).  A bare `npm install -g <name>`
+        # re-resolves the `latest` dist-tag EVERY morning, and this step
+        # runs immediately before "Run morning QA skill", whose env block
+        # carries ANTHROPIC_API_KEY, MDB_MCP_CONNECTION_STRING (the
+        # read-only URI to your database — which may hold production
+        # data), API_ACCESS_KEY, ADMIN_API_KEY, SENTRY_AUTH_TOKEN and
+        # GH_TOKEN.  Unpinned, a compromised or account-takeover release
+        # reaches that secret-bearing environment within 24h with no repo
+        # change to review and nothing in any diff to notice.  Every
+        # `uses:` here is already SHA-pinned and the pip tooling above is
+        # exact-pinned for the same reason; the two npm installs in this
+        # job were the last floating supply-chain inputs in the workflow.
+        #
+        # This package publishes `dependencies: {}` and no shrinkwrap; its
+        # only deps are platform-binary `optionalDependencies` pinned
+        # EXACTLY to the pin's own version, no ranges (re-verify at each
+        # bump: `npm view @anthropic-ai/claude-code@<v> dependencies
+        # optionalDependencies`), so the version pin alone freezes the
+        # whole install tree — unlike the mongodb-mcp-server pin below,
+        # whose transitives still float.
+        #
+        # Side benefit, deliberately taken: a pinned CLI also freezes the
+        # `--output-format stream-json` WIRE SHAPE, which
+        # .github/scripts/qa_run_telemetry.js parses for the cost footer.
+        # Floating, a producer-side shape change could degrade that footer
+        # overnight with no code change; pinned, any such move arrives as
+        # a reviewable bump.  (The other half of the silent-upgrade
+        # class — the default MODEL — is guarded independently by the
+        # explicit `--model` flag in the Claude step below.)
+        #
+        # LIFECYCLE: bump DELIBERATELY — read the release notes against
+        # this invocation (the flags it passes, the stream-json result
+        # fields the telemetry script reads, skill discovery), swap the
+        # literal + its date comment, append one BUMP LOG entry, then
+        # confirm on the next scheduled run that skill loading, `--model`,
+        # and the telemetry footer all still work.  Nothing auto-refreshes
+        # this; a stale pin is the accepted cost of a reviewable one.
+        # Never revert to a bare name or @latest.
+        #
+        # BUMP LOG (append one line per bump: date, version, trigger, what
+        # the release-note read found):
+        #   2026-07-23  2.1.218 — first pin.  `latest` that day.
+        #   2026-08-23  2.1.241 — `latest` that day.  Trigger: a Check 7
+        #     staleness Warning (31 d behind `latest`).  Release notes
+        #     read against this invocation: nothing moves `-p` /
+        #     stream-json result fields / --model / --permission-mode /
+        #     --allowed- + --disallowed-tools / skill discovery.
+        run: npm install -g @anthropic-ai/claude-code@2.1.241  # published `latest` at pin time, 2026-08-23
+
+      - name: Pre-install mongodb-mcp-server (warm before Claude starts)
+        # Without this, .mcp.qa.json's `command: mongodb-mcp-server` would
+        # have nothing to spawn (or, if .mcp.qa.json used `npx -y
+        # mongodb-mcp-server@latest`, npm would cold-fetch the package
+        # during Claude's MCP handshake — exceeding the CLI's MCP startup
+        # timeout (~5-10s) on a small runner where the fetch + install +
+        # spawn takes ~10-22s; the observed symptom was "MCP server was
+        # reported 'connecting' at session start but never produced its
+        # tool surface").  Pre-installing globally lets .mcp.qa.json call
+        # the binary directly with zero cold-start cost.
+        #
+        # EXACT pin (2026-07-23) for the same daily-latest exfiltration
+        # channel documented on the "Install Claude Code CLI" step above —
+        # same rationale, same deliberate-bump lifecycle.  `@latest` was
+        # the literal opposite: it re-resolved every morning into a job
+        # that then hands the process MDB_MCP_CONNECTION_STRING.
+        #
+        # Narrower guarantee than the CLI pin: this package ships no
+        # shrinkwrap and its deps carry caret ranges, so pinning the top
+        # level shuts the direct-publisher window but transitives still
+        # re-resolve daily.  Closing that too means vendoring a lockfile
+        # for a global install — not worth it at this blast radius, but
+        # note the residual if your runner ever grows a wider secret
+        # surface.
+        run: |
+          npm install -g mongodb-mcp-server@1.14.0
+          which mongodb-mcp-server
+          # Best-effort version log — older mongodb-mcp-server releases
+          # do not implement --version; suppress to avoid alarming red
+          # text in the workflow log when the flag is unrecognised.
+          mongodb-mcp-server --version 2>/dev/null || echo "(mongodb-mcp-server: --version not supported by this release)"
+
+      - name: Pre-compute deterministic check inputs
+        # Runs the mechanical, deterministic probes (HTTP GETs, greps,
+        # git-read, the slow npm/pip audits) that the QA agent would
+        # otherwise run one-per-model-turn, and writes
+        # /tmp/qa-precompute/bundle.md.  The agent READS that bundle and
+        # applies judgment — severity, the Mongo cross-check gate, the
+        # report.  Born from a 2026-07 cost analysis: turn count — NOT
+        # model choice — drives cost + the 30-min timeout risk; parsing
+        # one 125-turn run showed ~50 of its 72 Bash calls were exactly
+        # this mechanical gathering.  See docs/precompute.md.
+        #
+        # FAIL-SOFT is load-bearing because the 30-min cap was
+        # deliberately KEPT (don't mask the "something is wrong" signal):
+        #   * the script ALWAYS exits 0 and tags any failed probe
+        #     PRECOMPUTE_ERROR;
+        #   * continue-on-error + the `|| echo` are belt-and-suspenders;
+        #   * timeout-minutes bounds this step so a hang can never eat the
+        #     agent's budget (per-probe timeouts + a soft deadline inside
+        #     the script are the inner guards; typical run is ~1-2 min).
+        # A broken pre-compute step degrades to exactly the
+        # pre-pre-compute behavior: every bundle block is absent/ERROR, so
+        # the agent runs each check's own probes from checks/NN-*.md.
+        #
+        # Env is a SUBSET of the agent step's: the same read-only probe
+        # secrets the agent's Bash already uses — deliberately NO
+        # ANTHROPIC_API_KEY and NO MDB_MCP_CONNECTION_STRING (Mongo stays
+        # on the read-only MCP, the agent's judgment path).  Secret
+        # posture is IMPROVED vs the agent probing: these run in a
+        # GH-secret-masked `run:` step, never entering the stream-json
+        # transcript that the agent's Bash command strings do.  The script
+        # passes secrets to curl via arg lists (never a shell echo) and
+        # redacts known values from the bundle.
+        continue-on-error: true
+        timeout-minutes: 8
+        env:
+          # Repo VARIABLE (not a secret): your deployed app's origin,
+          # e.g. https://app.example.com — Check 9's /admin/cron-health
+          # probe and the DEPLOY STATE receipt read it. Unset ⇒ both
+          # SKIP (fail-soft), so the template runs before you've wired
+          # an app to it.
+          APP_BASE_URL: ${{ vars.APP_BASE_URL }}
+          API_ACCESS_KEY: ${{ secrets.API_ACCESS_KEY }}
+          ADMIN_API_KEY: ${{ secrets.ADMIN_API_KEY }}
+          SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
+          SENTRY_ORG_SLUG: ${{ secrets.SENTRY_ORG_SLUG }}
+          SENTRY_PROJECTS: ${{ secrets.SENTRY_PROJECTS }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          python3 .github/scripts/qa_precompute.py \
+            || echo "pre-compute exited non-zero — agent self-gathers every check (fail-soft)"
+
+      - name: Run morning QA skill
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          # Same repo VARIABLE as the pre-compute step: the app origin
+          # the checks probe. Unset ⇒ app-facing checks self-skip.
+          APP_BASE_URL: ${{ vars.APP_BASE_URL }}
+          # Optional — powers a Sentry-triage check if your roster adds
+          # one (the starter roster — Checks 0, 7, 9 — doesn't use them;
+          # a check whose credential is unset self-skips with a note).
+          SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
+          SENTRY_ORG_SLUG: ${{ secrets.SENTRY_ORG_SLUG }}
+          SENTRY_PROJECTS: ${{ secrets.SENTRY_PROJECTS }}
+          # Read-only API probes against your deployed app (sent as an
+          # X-Api-Key header).  Reusing the app's existing server-to-server
+          # key rather than minting a separate one avoids a multi-key
+          # refactor — and the skill's secret-handling rules already
+          # forbid echo/log of any *_KEY env var.
+          API_ACCESS_KEY: ${{ secrets.API_ACCESS_KEY }}
+          # 2026-05-23 — added to unblock Check 9 (cron heartbeats).
+          # Before this the check tried to connect to the app's Mongo
+          # directly and timed out (the runner has no Mongo URI on
+          # purpose); the check was marked skipped every morning.  The
+          # /admin/cron-health endpoint returns the stuck-job scan over
+          # HTTP, gated by the same X-Admin-Key the app's existing admin
+          # endpoints use.  Reusing the existing admin key avoids adding a
+          # new exfiltration surface for a Tier-1 read-only agent.
+          ADMIN_API_KEY: ${{ secrets.ADMIN_API_KEY }}
+          # 2026-06-10 — powers the Mongo cross-check gate for Critical
+          # findings (SKILL.md § "Mongo cross-check gate for Critical
+          # findings", motivated by a false-alarm postmortem: an HTTP
+          # probe's stale answer nearly paged the operator over a healthy
+          # system).  The value is the same read-only Mongo URI the
+          # operator uses locally; in CI it is provisioned as a GH Actions
+          # Secret.  The read-only Mongo MCP subprocess (spawned via the
+          # pre-installed `mongodb-mcp-server` binary per .mcp.qa.json)
+          # inherits this var; the agent never sees the URI itself, only
+          # the typed MCP tool surface.  The skill's secret-handling rules
+          # (forbidden-idiom list — KEY/SECRET/TOKEN/PASSWORD/URI/PAT/
+          # CREDENTIAL/DSN/CONNECTION_STRING) already cover any accidental
+          # `echo $MDB_MCP_CONNECTION_STRING` — never `echo`, `env`, or
+          # `printenv` this value from any `run:` block.
+          MDB_MCP_CONNECTION_STRING: ${{ secrets.MDB_MCP_CONNECTION_STRING }}
+          # Give the Claude step its own GH_TOKEN so cross-day diff
+          # queries (`gh issue view <yesterday's issue>`) work from inside
+          # the skill, not just from the post-issue step.  The workflow's
+          # top-level permissions block already grants `issues: write` for
+          # posting today's body; the same token is sufficient for
+          # read-only diff queries inside the Claude step.  Without this,
+          # the agent reported "no prior baseline" for every check's
+          # delta.  (On a self-hosted runner without `gh` installed these
+          # queries degrade — the agent already treats "no prior baseline"
+          # as Info-level, not Warning.)
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Claude Code CLI invocation — the flags below each encode a
+          # lesson; change them only with the history in mind.
+          #   * No `claude run` subcommand exists; use `claude -p`.  No
+          #     `--skill` flag: skills are auto-discovered from
+          #     .claude/skills/ and invoked as slash commands in the
+          #     prompt body.  (The first scheduled run ever, 2026-05-20,
+          #     failed on exactly these two assumptions.)
+          #   * CI is non-interactive, so the permission mode must NEVER
+          #     prompt (a prompt hangs the run forever).  We use
+          #     `--permission-mode dontAsk` — NOT `--dangerously-skip-
+          #     permissions`.  dontAsk runs allowlisted tools without a
+          #     prompt: no hang.  (skip-permissions was WRONG here: it put
+          #     the CLI in bypassPermissions mode, which makes the
+          #     allowlist a NO-OP — "allow rules have no effect" per the
+          #     Claude Code docs; verified live 2026-07-15.)
+          #   * ⚠️ `--allowed-tools` is PRE-APPROVAL, not restriction.
+          #     Under dontAsk, tools OFF the list can still run — a
+          #     2026-07 run's artifact showed two successful `Write` calls
+          #     (landing files in the runner user's home dir) despite
+          #     Write being absent from the allowlist.  Until that was
+          #     found, the Tier-1 read-only posture rested ONLY on the
+          #     skill's hard constraints — NOT the CLI.
+          #     FIX (2026-07-24, live-verified 2026-07-28): the invocation
+          #     passes `--disallowed-tools 'Write,Edit,NotebookEdit'`,
+          #     which per the CLI reference "removes the matching tools
+          #     from Claude's context" — closing the exact vector that run
+          #     exercised.  Proven by a later scheduled run whose
+          #     stream-json init event lists the tool surface with NO
+          #     Write/Edit/NotebookEdit.  Re-verify after a CLI bump:
+          #       grep '"subtype":"init"' in the claude-stdout.log artifact
+          #     ⚠️ Do NOT read `permission_denials` as proof either way: a
+          #     Tier-1 agent must never even attempt a mutating call, so
+          #     it stays `[]` on every healthy run.  Empty means "nothing
+          #     was attempted".  The init tool list is the evidence.
+          #     Residual: non-allow-listed verbs of the LOADED MCP servers
+          #     (mongodb-logs, export, db-stats, …) remain callable — the
+          #     allowlist is pre-approval, not restriction.  Locking the
+          #     verb surface needs per-verb `--disallowed-tools` entries.
+          #   * `--mcp-config .mcp.qa.json` loads ONLY read-only servers
+          #     (the mongo-ro server, read-only by design via
+          #     MDB_MCP_READ_ONLY=true).
+          #     ⚠️ `--mcp-config` alone is ADDITIVE — the project's own
+          #     .mcp.json in the checkout is merged in.  Discovered live
+          #     2026-07: a Tier-2 WRITE-capable MCP server from the
+          #     project config was being loaded into the Tier-1 process,
+          #     and only failed to start because its credentials were
+          #     absent on the runner — containment by accident, not by
+          #     configuration.  FIX: `--strict-mcp-config`, which per the
+          #     CLI reference uses "only MCP servers from --mcp-config,
+          #     ignoring all other MCP configurations".  Verified
+          #     2026-07-28: the init event lists exactly the read-only QA
+          #     server(s) — containment by configuration.
+          #     The MCP tool entries in the allowlist restrict to the 5
+          #     read-only Mongo verbs the cross-check gate actually needs
+          #     (find/count/aggregate/collection-schema/list-collections —
+          #     NOT mongodb-logs, export, db-stats, etc.).
+          #   * `--model claude-sonnet-5` — PINNED 2026-07-23.  Unpinned,
+          #     the CLI default silently drifted to an Opus-class model
+          #     and the daily run measured $5.88-$6.84 (~$190/mo) — ~30x
+          #     the design estimate, which assumed "Sonnet, model default"
+          #     back when the default WAS Sonnet-class.  Sonnet 5 repriced
+          #     the same measured token profile to ~$2.6/run.  Per-run
+          #     cost is authoritative in the stream-json `result` event
+          #     (total_cost_usd) and surfaced on the daily issue by the
+          #     telemetry step below.  Quality regression → pin a bigger
+          #     model explicitly; NEVER return to unpinned — a default is
+          #     a price that changes with CLI upgrades.
+          #
+          # Stream the agent's events instead of buffering to completion.
+          # With `--output-format text` the CLI emits nothing until it
+          # finishes, so when a run was killed at the timeout cap the
+          # uploaded claude-stdout.log was 0 bytes — zero signal on WHICH
+          # check hung (2026-07-15).  `stream-json` (which requires
+          # --verbose in -p mode) emits per-event lines as they happen;
+          # `tee` lands them in BOTH the live Actions log (visible in real
+          # time, survives a mid-run kill) AND the 30-day artifact, so the
+          # next slow-or-killed run is diagnosable.
+          #
+          # Secret surface: stream-json echoes the Bash COMMAND strings
+          # the checks run.  Acceptable because (a) the skill's
+          # forbidden-idiom list bars literal credential VALUES in any
+          # command (env-var references only — never `echo $X_KEY`), and
+          # (b) GH Actions auto-masks every registered secrets.* to `***`
+          # in step logs.  Tool RESULTS are read-only check output, no
+          # secrets.  Do NOT widen --allowed-tools to anything that could
+          # surface a credential value without re-reviewing this.
+          #
+          # pipefail so the `|| echo` fallback keys off claude's exit
+          # code, not tee's (tee almost always exits 0).  The real
+          # report-presence gate is the `if [ ! -s /tmp/qa-report.md ]`
+          # block below; this echo is just an informational breadcrumb.
+          set -o pipefail
+          claude -p "/morning-qa" \
+            --model claude-sonnet-5 \
+            --output-format stream-json --verbose \
+            --permission-mode dontAsk \
+            --mcp-config .mcp.qa.json \
+            --strict-mcp-config \
+            --allowed-tools 'Read,Bash,WebFetch,mcp__mongo-ro__count,mcp__mongo-ro__find,mcp__mongo-ro__aggregate,mcp__mongo-ro__collection-schema,mcp__mongo-ro__list-collections' \
+            --disallowed-tools 'Write,Edit,NotebookEdit' \
+            2>&1 | tee /tmp/claude-stdout.log \
+            || echo "Claude run exited non-zero — continuing to post whatever report it produced."
+
+          # The skill writes /tmp/qa-report.md INCREMENTALLY — a valid,
+          # self-contained report is on disk after every check (SKILL.md
+          # § Output protocol).  So on a mid-run death (API drop / 30-min
+          # cap) the file is a non-empty PARTIAL report (Status "⏳ In
+          # progress (k/N)") and this block is skipped — we post the
+          # partial as-is, which is the whole point of the fail-soft
+          # design.  This fallback only fires if the run died BEFORE the
+          # agent wrote even the initial skeleton (a very early crash) —
+          # a genuinely empty file.  Silence is worse than a known
+          # failure, so we still synthesize SOMETHING.
+          if [ ! -s /tmp/qa-report.md ]; then
+            {
+              # This body once carried NO severity marker at all, so the
+              # single hardest failure mode (agent died before writing
+              # even the skeleton) reached the post-issue classifier as a
+              # marker-less report and came out UNLABELED (2026-08-06).
+              # `unknown` is the honest value: zero checks ran, so
+              # coverage is unestablished — not `none` (that would claim a
+              # clean day) and not `critical` (there is no finding; see
+              # the label rationale in the post-issue step below).
+              echo "<!-- qa-max-severity: unknown -->"
+              echo "# Morning QA — $(date -u +%F)"
+              echo ""
+              echo "**Status:** 🔴 Agent did not produce a report."
+              echo ""
+              echo "The Claude Code skill exited without writing /tmp/qa-report.md."
+              echo "See the workflow run log for stdout/stderr."
+              echo ""
+              echo "## stdout tail (last stream-json events, truncated)"
+              echo '```'
+              # stdout is stream-json (one JSON event per line, some
+              # embedding large tool I/O), so bound this hard: an
+              # unbounded tail could blow past GitHub's 65,536-char
+              # issue-body limit and fail the post-issue
+              # `gh issue --body-file` — the very failure path this
+              # fallback exists to survive.  Last 25 events, each clipped
+              # to 240 chars (≤ ~6 KB); enough to see which tool/check
+              # was live when it died.
+              tail -25 /tmp/claude-stdout.log | cut -c1-240 || echo "(no stdout captured)"
+              echo '```'
+            } > /tmp/qa-report.md
+          fi
+
+      - name: Append run telemetry to report
+        # Cost observability (ships with the --model pin above): a
+        # completed run's LAST stream-json event (`type:"result"`)
+        # carries the whole-session total_cost_usd + turn count.  Surface
+        # one footer line on the daily issue so model/price drift is
+        # visible the morning it happens, not on the monthly invoice (the
+        # unpinned-default drift above ran unnoticed for weeks precisely
+        # because cost lived only in the provider Console).  Parsing uses
+        # node — on PATH via setup-node earlier in this job — NOT jq,
+        # which isn't a guaranteed install on a self-hosted box.
+        #
+        # The parser lives in .github/scripts/qa_run_telemetry.js (NOT
+        # inline `node -e`) so it is unit-testable and immune to the
+        # bash-single-quote copy-edit hazard.  Fail-soft like the rest of
+        # this job: the script exits 0 on every parse/read problem with a
+        # distinct footer per failure mode, and the `|| echo` absorbs
+        # even a node crash — a missing footer must never block the
+        # report -> artifact -> issue chain.
+        #
+        # TRUST BOUNDARY: the parsed log is writable by the same OS user
+        # the agent's Bash tool runs as, so the footer is BEST-EFFORT
+        # observability for accidental drift — the provider Console /
+        # invoice remains the integrity source for cost auditing, and a
+        # clean footer is never proof of a clean spend (see the script
+        # header + docs/design.md § Cost).
+        if: always()
+        run: |
+          node .github/scripts/qa_run_telemetry.js /tmp/claude-stdout.log /tmp/qa-report.md \
+            || echo "telemetry footer failed non-fatally; report posts without it"
+
+      - name: Upload run artifacts
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: morning-qa-${{ github.run_id }}
+          path: |
+            /tmp/qa-report.md
+            /tmp/claude-stdout.log
+            /tmp/qa-precompute/bundle.md
+          retention-days: 30
+
+  # ── JOB 2 — Post the QA report as a GitHub issue ───────────────────────
+  # Always ubuntu-latest: this job needs the `gh` CLI, which hosted
+  # runners ship and a self-hosted run-qa box may not (the original
+  # motivation for the two-job split).  Downloads the artifact from
+  # Job 1 and runs the full gh-label-create → gh-issue-post → supersede
+  # → verify chain.  `if: always()` ensures the issue still gets posted
+  # even when run-qa exits non-zero — run-qa's "report missing" fallback
+  # synthesizes a 🔴 body which still flows into this job via the
+  # artifact.
+  post-issue:
+    runs-on: ubuntu-latest
+    needs: run-qa
+    if: always()  # Post even if run-qa failed; fallback body still uploaded
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout repo
+        # Needed by the label-create / issue-post steps below — they
+        # don't actually read repo files, but `gh` resolves the target
+        # repo from the local git context unless you pass `--repo`.
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+
+      - name: Download QA report artifact
+        # Job 1 uploads /tmp/qa-report.md + /tmp/claude-stdout.log into
+        # the run's artifact bundle; we pull them into the same paths so
+        # the post-issue logic that reads /tmp/qa-report.md works
+        # unchanged.
+        #
+        # continue-on-error is set so a missing artifact (run-qa
+        # cancelled before its upload step) doesn't hard-stop this job —
+        # the synthesize-fallback step below covers that gap.
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          name: morning-qa-${{ github.run_id }}
+          path: /tmp
+        continue-on-error: true
+
+      - name: Synthesize fallback report if artifact is missing
+        # If run-qa was cancelled before its "Upload run artifacts" step
+        # ran (e.g. timeout hit, runner went offline mid-job), the
+        # artifact download above is a no-op and /tmp/qa-report.md
+        # doesn't exist.  Write a synthesized 🔴 body so the issue still
+        # posts and surfaces the upstream failure rather than going
+        # silent.
+        #
+        # Deliberately `critical`, NOT the `unknown` that run-qa's own
+        # no-report fallback emits.  The two are different failures:
+        # run-qa reaching its upload step means the box was alive and we
+        # have a transcript to read, whereas NO artifact at all means the
+        # job died or the runner vanished — no report, no stdout log, no
+        # telemetry.  `critical` also pins the day open through the
+        # supersede step below, which is right for a total blackout.
+        # Downgrading this to `unknown` would quietly weaken an existing
+        # alarm, so it stays.
+        run: |
+          if [ ! -s /tmp/qa-report.md ]; then
+            {
+              echo "<!-- qa-max-severity: critical -->"
+              echo "# Morning QA — $(date -u +%F)"
+              echo ""
+              echo "**Status:** 🔴 Job 1 (run-qa) produced no artifact."
+              echo ""
+              echo "The run-qa job either crashed before its upload-artifact step"
+              echo "or was cancelled.  See the run-qa job log for details:"
+              echo "https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+            } > /tmp/qa-report.md
+          fi
+
+      - name: Ensure required labels exist
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Idempotent label creation (--force = create if missing,
+          # update if exists).  Added after the very first scheduled run
+          # (2026-05-20) failed with "could not add label:
+          # 'qa-agent-daily' not found" — gh CLI errors if you try to
+          # apply a label that doesn't exist; pre-creating here makes the
+          # workflow self-healing on a fresh repo or after label
+          # deletion.
+          gh label create qa-agent-daily \
+            --color 0E8A16 \
+            --description "Daily report from the morning QA agent" \
+            --force
+          gh label create priority:critical \
+            --color B60205 \
+            --description "Critical finding flagged by the QA agent" \
+            --force
+          # Completeness is a SEPARATE axis from severity (2026-08-06).
+          # priority:critical says "a finding needs triage"; this says
+          # "the run stopped early, so today's coverage is unknown".
+          # Amber, between the qa-agent-daily green and the
+          # priority:critical red.
+          gh label create qa-agent-incomplete \
+            --color FBCA04 \
+            --description "QA run ended before completing all checks — coverage unknown, not a clean day" \
+            --force
+
+      - name: Post / update daily QA Issue
+        id: post_issue
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          DATE=$(date -u +%F)
+          # Export so jq can read it via env.TITLE below — same idiom
+          # the supersede step uses for TODAY_TITLE.
+          export TITLE="[qa-agent] ${DATE} morning report"
+
+          # Reuse today's Issue if it already exists (manual re-run
+          # case).  Otherwise create a fresh one.
+          #
+          # BUG FIXED 2026-06-06: this used to be
+          #   gh issue list --search "$TITLE in:title"
+          # but `gh issue list --search` does TOKENIZED matching, not
+          # exact — so today's `[qa-agent] 2026-06-06 morning report`
+          # fuzzy-matched yesterday's `[qa-agent] 2026-06-05 morning
+          # report` on the shared tokens (qa-agent, morning, report).
+          # The edit then overwrote yesterday's BODY without touching
+          # its title; the supersede step (next) then closed it because
+          # the title still said 2026-06-05.  Net: today's report
+          # buried in a closed, mis-titled issue — while the workflow
+          # reported success.
+          #
+          # Fix: list by label only, then jq-filter on EXACT title
+          # equality.  Same `env.X` pattern as the supersede step.
+          EXISTING=$(gh issue list --label qa-agent-daily --state open --limit 100 \
+                       --json number,title \
+                       --jq '.[] | select(.title == env.TITLE) | .number' \
+                       2>/dev/null | head -1 || echo "")
+
+          # Labels come from the report body — the `<!-- qa-max-severity:
+          # ... -->` marker the skill writes as the report's FIRST line,
+          # plus its Status line (both parsed by the classifier script
+          # invoked below).
+          # `gh issue create` accepts `--label`; `gh issue edit` accepts
+          # `--add-label`.  They are NOT interchangeable — passing
+          # `--label` to `edit` errors with "unknown flag: --label"
+          # (learned from a live failure, 2026-05).  Build separate arg
+          # strings per code path.
+          CREATE_LABEL_ARGS="--label qa-agent-daily"
+          EDIT_LABEL_ARGS="--add-label qa-agent-daily"
+          # ── Classify the report: severity AND completeness ──────────────
+          #
+          # The classifier moved OUT of this step into a checked-in script
+          # on 2026-08-06, after its THIRD inline bug.  The script header
+          # carries the full history; the short version is that bash
+          # living in a `run:` block cannot be executed by a test, so each
+          # of the three bugs shipped silently and was found in production
+          # by the operator.  Same move, same directory, same rationale as
+          # qa_run_telemetry.js.
+          #
+          # Two INDEPENDENT booleans, deliberately not one severity ladder:
+          #   is_critical   -> priority:critical     (a finding needs triage)
+          #   is_incomplete -> qa-agent-incomplete   (coverage is unknown)
+          # Both can be 1 at once — a run that found a Critical, then died.
+          #
+          # Why is_incomplete gets its OWN label instead of reusing
+          # priority:critical: (a) priority:critical is a SEVERITY label —
+          # its description above says "Critical FINDING" — and an aborted
+          # run has no finding, so conflating the two re-opens the
+          # 2026-06-03 alarm-fatigue bug from the other side and pollutes
+          # the calibration ledger's Critical-false-positive target with
+          # infrastructure flake; (b) the supersede step below pins
+          # priority:critical days open indefinitely, which is wrong for a
+          # day whose ground tomorrow's run re-covers anyway.
+          #
+          # Fail-soft, twice over: the script always exits 0 and defaults
+          # to is_incomplete=1 when it cannot read the report (never
+          # assert "clean" about a report we could not examine), and the
+          # `|| true` means even a missing or unexecutable script cannot
+          # take the daily issue down.
+          #
+          # The two flags then fail in OPPOSITE directions, deliberately.
+          # If the classifier is missing/broken its output parses empty,
+          # and:
+          #   * is_critical fails CLOSED (`= "1"`) — a classifier crash
+          #     must not manufacture a daily false Critical; that is the
+          #     2026-06-03 alarm-fatigue bug.
+          #   * is_incomplete fails OPEN (`!= "0"`) — anything other than
+          #     a definite "0" is treated as incomplete, because a broken
+          #     classifier is precisely a state in which we have NOT
+          #     established that the day is clean.  Defaulting it to 0
+          #     would rebuild the 2026-08-06 defect one layer up: a
+          #     silently degraded classifier would render every day
+          #     benign.
+          # Net: labels degrade toward "look at this", never toward "all
+          # clear", and the report still posts either way.
+          CLASSIFY=$(bash .github/scripts/qa_severity_label.sh /tmp/qa-report.md || true)
+          IS_CRITICAL=$(printf '%s\n' "$CLASSIFY" | sed -n 's/^is_critical=//p' | head -1)
+          IS_INCOMPLETE=$(printf '%s\n' "$CLASSIFY" | sed -n 's/^is_incomplete=//p' | head -1)
+          echo "classifier: is_critical=${IS_CRITICAL:-<unparsed>} is_incomplete=${IS_INCOMPLETE:-<unparsed>}"
+          if [ "$IS_CRITICAL" = "1" ]; then
+            CREATE_LABEL_ARGS="$CREATE_LABEL_ARGS --label priority:critical"
+            EDIT_LABEL_ARGS="$EDIT_LABEL_ARGS --add-label priority:critical"
+          elif [ "$IS_CRITICAL" != "0" ]; then
+            # Unparseable (classifier missing/broken).  Touch the label in
+            # NEITHER direction: we have not established that today is
+            # critical, but we have equally not established that it is
+            # not, and the else-branch below would REMOVE
+            # priority:critical from a day that genuinely is critical —
+            # silently disarming the alarm on the one path where we are
+            # already blind.  Leave whatever is on the issue and make the
+            # degradation visible in the log.
+            echo "::warning::QA severity classifier produced no parseable verdict; leaving priority:critical untouched"
+          else
+            # BUG FIXED 2026-07-15: the priority:critical label used to be
+            # ADD-only, so it never tracked a DOWNGRADE.  A day first
+            # posted critical (the "no report" fallback above stamps
+            # `<!-- qa-max-severity: critical -->`, and a late/manual
+            # re-run that produces a real report EDITS the same day's
+            # issue) kept the stale critical label forever.  A
+            # non-critical day left labeled priority:critical (a) reads as
+            # a live alarm against the QA agent's Critical-false-positive
+            # target and (b) makes the supersede step below pin that day
+            # open as an "unresolved critical".  Confirmed live on a
+            # clean-report day still wearing the label.  Make the label
+            # track the CURRENT report: drop it whenever the report is
+            # non-critical.  Only the edit path needs this — a freshly
+            # `gh issue create`d issue has no label to remove, and
+            # `create` has no --remove-label flag.  `gh issue edit
+            # --remove-label` is a no-op when the label is absent, and
+            # priority:critical is pre-created in the "Ensure required
+            # labels exist" step above so it always resolves in-repo —
+            # making this safe and idempotent on every run.
+            EDIT_LABEL_ARGS="$EDIT_LABEL_ARGS --remove-label priority:critical"
+          fi
+          if [ "$IS_INCOMPLETE" != "0" ]; then
+            CREATE_LABEL_ARGS="$CREATE_LABEL_ARGS --label qa-agent-incomplete"
+            EDIT_LABEL_ARGS="$EDIT_LABEL_ARGS --add-label qa-agent-incomplete"
+          else
+            # Same downgrade discipline the 2026-07-15 bug above taught
+            # us, and it matters MORE here: the common path to a complete
+            # report on an incomplete day is a manual re-run, which EDITS
+            # the same day's issue.  A stale "incomplete" label on a
+            # now-complete report is precisely the misleading-label class
+            # this change exists to close, just inverted.  `--remove-label`
+            # is a no-op when the label is absent, and the label is
+            # pre-created in the step above so it always resolves in-repo
+            # — safe and idempotent on every run.
+            EDIT_LABEL_ARGS="$EDIT_LABEL_ARGS --remove-label qa-agent-incomplete"
+          fi
+
+          if [ -n "$EXISTING" ]; then
+            # Belt-and-suspenders: pass --title too, so even if the
+            # reuse-step lookup ever cross-matches a wrong-day issue
+            # (the 2026-06-06 silent-failure shape), the issue title
+            # gets corrected to today's instead of staying stale and
+            # then getting closed by the supersede step.
+            gh issue edit "$EXISTING" --title "$TITLE" --body-file /tmp/qa-report.md $EDIT_LABEL_ARGS
+            ISSUE_NUMBER="$EXISTING"
+            echo "Updated existing Issue #$EXISTING"
+          else
+            # `gh issue create` prints the new issue URL on stdout
+            # (single line in non-interactive CI mode).  `tail -1`
+            # guards against any future banner lines preceding it.
+            ISSUE_URL=$(gh issue create \
+              --title "$TITLE" \
+              --body-file /tmp/qa-report.md \
+              $CREATE_LABEL_ARGS | tail -1)
+            ISSUE_NUMBER="${ISSUE_URL##*/}"
+            echo "Created Issue #$ISSUE_NUMBER ($ISSUE_URL)"
+          fi
+          # Hand the issue number to the verify-state step downstream.
+          # Replaces a label-indexed re-query that hit a GitHub
+          # eventual-consistency race (2026-06-07): the issue was created
+          # at 11:52:15Z but did not appear in `gh issue list --label
+          # qa-agent-daily --state open` at 11:52:16Z, so the verify step
+          # exited 1 and GH emailed "all jobs failed" even though the
+          # report was live and correct.  The issue-detail endpoint is
+          # strongly consistent after create/edit, so `gh issue view <N>`
+          # has no race.
+          echo "issue_number=${ISSUE_NUMBER}" >> "$GITHUB_OUTPUT"
+
+      - name: Close superseded daily QA issues
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Keep open only: today's qa-agent-daily issue, plus any prior
+          # daily still labeled priority:critical (an unresolved critical
+          # must NOT be silently buried — the daily-snapshot model can't
+          # assume a windowed or short-circuited check re-detects it
+          # today).  Close every other open qa-agent-daily issue now that
+          # today's is posted; closed snapshots stay readable in history.
+          #
+          # qa-agent-incomplete days are deliberately NOT pinned open the
+          # way priority:critical days are.  An aborted run has nothing
+          # to resolve — tomorrow's full run re-covers the same ground —
+          # so keeping those issues open would accumulate dead tickets
+          # the operator has to hand-close, which is the alarm-fatigue
+          # shape the label exists to avoid.  The label still makes the
+          # streak searchable: `label:qa-agent-incomplete` over closed
+          # issues shows every day the observer died.
+          #
+          # Robustness: this is non-fatal cleanup, so a transient `gh`
+          # failure must NOT turn the whole morning-QA run red.  Feed the
+          # list via process substitution (its exit code sits OUTSIDE the
+          # pipeline, so the default `bash -eo pipefail` can't abort on a
+          # left-hand `gh` hiccup) and swallow any close error.
+          DATE=$(date -u +%F)
+          export TODAY_TITLE="[qa-agent] ${DATE} morning report"
+          while read -r N; do
+            [ -z "$N" ] && continue
+            gh issue close "$N" \
+              -c "Superseded by today's QA report (${TODAY_TITLE}). Auto-closed by the morning-QA workflow so only the latest daily (plus any unresolved-critical day) stays open; this snapshot remains readable in the issue history." \
+              && echo "closed superseded #$N" || echo "skip #$N"
+          done < <(gh issue list --label qa-agent-daily --state open --limit 100 \
+                     --json number,title,labels \
+                     --jq '.[] | select(.title != env.TODAY_TITLE) | select(([.labels[].name] | index("priority:critical")) | not) | .number' \
+                   || true)
+
+      - name: Verify today's daily issue is open with the correct title
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ISSUE_NUMBER: ${{ steps.post_issue.outputs.issue_number }}
+        run: |
+          # Regression guard for the 2026-06-06 silent-failure bug: the
+          # workflow reported success but today's report had been written
+          # into a yesterday-titled, closed issue.  Assert that the issue
+          # we just posted/edited is OPEN with title EXACTLY equal to
+          # `[qa-agent] YYYY-MM-DD morning report`.
+          #
+          # Bug FIXED 2026-06-07: this used to re-query the label index
+          # via `gh issue list --label qa-agent-daily --state open` and
+          # filter by title.  That query lags `gh issue create` by ~1s on
+          # GitHub's side (eventual consistency on the label index) — the
+          # verify ran one second after the create, the label query
+          # returned empty, the guard exited 1, and GH emailed "all jobs
+          # failed" even though the report was live.  Now: read the issue
+          # number from the previous step's output and `gh issue view` it
+          # directly — the issue-detail endpoint is strongly consistent,
+          # no race surface.
+          DATE=$(date -u +%F)
+          EXPECTED_TITLE="[qa-agent] ${DATE} morning report"
+          if [ -z "$ISSUE_NUMBER" ]; then
+            echo "::error::post_issue step did not emit issue_number — upstream broken."
+            exit 1
+          fi
+          PAYLOAD=$(gh issue view "$ISSUE_NUMBER" --json state,title 2>&1) || {
+            echo "::error::gh issue view #${ISSUE_NUMBER} failed:"
+            echo "$PAYLOAD"
+            exit 1
+          }
+          STATE=$(echo "$PAYLOAD" | jq -r '.state')
+          ACTUAL_TITLE=$(echo "$PAYLOAD" | jq -r '.title')
+          if [ "$STATE" != "OPEN" ]; then
+            echo "::error::Issue #${ISSUE_NUMBER} is in state '${STATE}', expected OPEN."
+            echo "::error::Today's QA report was created but then closed —"
+            echo "::error::this is the 2026-06-06 title-reuse silent-failure shape."
+            exit 1
+          fi
+          if [ "$ACTUAL_TITLE" != "$EXPECTED_TITLE" ]; then
+            echo "::error::Issue #${ISSUE_NUMBER} has title '${ACTUAL_TITLE}', expected '${EXPECTED_TITLE}'."
+            echo "::error::Today's QA report landed in a wrong-day issue —"
+            echo "::error::this is the 2026-06-06 title-reuse silent-failure shape."
+            exit 1
+          fi
+          echo "Verified: today's QA report posted to issue #${ISSUE_NUMBER} with title '${EXPECTED_TITLE}' (state OPEN)."

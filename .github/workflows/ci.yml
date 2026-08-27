@@ -1,0 +1,63 @@
+# CI for the morning-qa framework repo itself (NOT the template — the
+# adopter-facing workflows live under template/ precisely so they don't
+# execute here).
+#
+# Two jobs, both required:
+#   * tests    — the doc↔code lockstep pins under tests/ (the same
+#                discipline the framework preaches, applied to itself).
+#   * denylist — scripts/denylist_scan.sh + a secret scan. This repo is
+#                a sanitized extraction from a private production system;
+#                the scan keeps a raw private-side paste from ever
+#                landing here (see PORTING.md).
+#
+# All actions and tools are pinned by SHA / exact version — the same
+# unattended-install reasoning documented in docs/design.md.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.12'
+      - name: Install test deps (pinned)
+        run: pip install pytest==8.3.4 pyyaml==6.0.2
+      - name: Run lockstep pins
+        run: python -m pytest tests/ -v
+
+  denylist:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.12'
+      - name: Denylist scan (private-origin references)
+        run: bash scripts/denylist_scan.sh
+      - name: Secret scan (detect-secrets, pinned)
+        run: |
+          pip install detect-secrets==1.5.0
+          # --all-files: no baseline exists on purpose — this tree must
+          # contain zero secrets, so any hit is a failure, not drift.
+          detect-secrets scan --all-files > /tmp/ds.json
+          python - <<'PY'
+          import json, sys
+          results = json.load(open('/tmp/ds.json'))['results']
+          if results:
+              for path, findings in results.items():
+                  for f in findings:
+                      print(f"{path}:{f['line_number']}: {f['type']}")
+              sys.exit(1)
+          print("detect-secrets clean.")
+          PY

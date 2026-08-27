@@ -1,0 +1,107 @@
+name: QA Ledger Retro
+
+# Weekly "bookkeeper" for the morning-QA calibration ledger.
+#
+# Reads the operator's TP/FP comments on recent `[qa-agent]` issues and PROPOSES
+# calibration-ledger rows in ONE sign-off issue.  It NEVER edits the ledger and
+# NEVER self-certifies — the operator's comment is the authority and pasting
+# approved rows into the ledger is a human step.  This unblocks the QA-agent
+# Tier-2 promotion gate (≥3 TP + 14 clean days) by making verdicts countable
+# without manual bookkeeping.  See docs/calibration_ledger.md +
+# docs/promotion_criteria.md.
+#
+# Deterministic (a unit-tested Python parser, NOT a Claude-in-CI agent) → low-risk:
+# read-only on the repo, the only write is one GitHub issue (same risk profile as
+# the already-trusted morning-qa workflow).  Runs on a hosted runner because it
+# needs the `gh` CLI (which a self-hosted run-qa box may not have).
+
+on:
+  schedule:
+    # Mondays 13:00 UTC — after the weekend's daily QA runs have posted.
+    - cron: '0 13 * * 1'
+  workflow_dispatch:
+    # Manual trigger for testing / on-demand sign-off batches.
+
+permissions:
+  contents: read     # checkout
+  issues: write      # read the [qa-agent] issues + post the one sign-off issue
+
+concurrency:
+  group: qa-ledger-retro
+  cancel-in-progress: false
+
+jobs:
+  retro:
+    runs-on: ubuntu-latest      # needs `gh` CLI — keep this on a hosted runner
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.12'   # parser is stdlib-only — no pip install needed
+
+      - name: Build proposed ledger rows from recent QA verdicts
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Optional strict allowlist of operator GH logins (comma-separated).  Left
+          # unset → any non-`[bot]` human commenter counts and bot accounts are
+          # excluded, so the agent can never self-certify either way.
+          QA_LEDGER_OPERATORS: ""
+        run: |
+          set -euo pipefail
+          # The last ~14 daily [qa-agent] issues (state all — they get superseded /
+          # closed by morning-qa, so most are closed).  --json comments returns each
+          # comment's author + body for the parser.
+          gh issue list --label qa-agent-daily --state all --limit 14 \
+            --json number,title,createdAt,comments > /tmp/qa-issues.json
+          python .github/scripts/qa_ledger_retro.py \
+            < /tmp/qa-issues.json > /tmp/proposed-rows.md
+          echo "----- proposed rows -----"; cat /tmp/proposed-rows.md
+
+      - name: Assemble sign-off issue body
+        run: |
+          set -euo pipefail
+          {
+            echo "_Auto-generated weekly by \`qa-ledger-retro.yml\`. The bookkeeper **proposes**; **you** sign off by pasting approved rows into the calibration ledger (see \`docs/calibration_ledger.md\`). It never edits the ledger or certifies its own findings._"
+            echo
+            cat /tmp/proposed-rows.md
+            echo
+            echo "---"
+            echo "_Window: the last 14 daily \`[qa-agent]\` issues. Comment \`TP\` or \`FP\` (+ a one-line reason, optionally \`Check N\`) on a daily QA issue and it shows up here next Monday._"
+          } > /tmp/issue-body.md
+
+      - name: Post / update the qa-ledger-retro sign-off issue
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          TITLE="[qa-ledger] Weekly calibration sign-off"
+          gh label create qa-ledger-retro \
+            --description "Weekly QA calibration-ledger sign-off proposals" \
+            --color C5DEF5 2>/dev/null || true
+          # Exact-title match via --jq — NOT `gh issue list --search`, which does
+          # TOKENIZED matching and will fuzzy-match similar titles (the same bug
+          # the morning-qa post step fixed on 2026-06-06).  The
+          # `[ … ] | first // empty` form returns the first match (or nothing) on a
+          # single line — avoids a `| head -1` SIGPIPE under `set -o pipefail`.
+          EXISTING=$(gh issue list --label qa-ledger-retro --state open --limit 50 \
+                       --json number,title \
+                       --jq "[.[] | select(.title == \"$TITLE\") | .number] | first // empty")
+          if [ -n "$EXISTING" ]; then
+            gh issue edit "$EXISTING" --title "$TITLE" --body-file /tmp/issue-body.md
+            NUM="$EXISTING"
+          else
+            # `gh issue create` prints the new issue URL on stdout; the number is its
+            # last path segment.
+            URL=$(gh issue create --title "$TITLE" --body-file /tmp/issue-body.md \
+                    --label qa-ledger-retro)
+            NUM="${URL##*/}"
+          fi
+          # Verify the deliverable via `gh issue view <N>`, NOT a list relist — the
+          # search index can lag right after create (the same eventual-consistency
+          # race the morning-qa verify step hit on 2026-06-07).
+          VERIFIED=$(gh issue view "$NUM" --json number --jq .number)
+          [ "$VERIFIED" = "$NUM" ] || { echo "::error::sign-off issue #$NUM not verifiable"; exit 1; }
+          echo "verified sign-off issue #$NUM"

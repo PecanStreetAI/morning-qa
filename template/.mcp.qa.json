@@ -1,0 +1,13 @@
+{
+  "_comment": "CI-scoped MCP config for .github/workflows/morning-qa.yml.  Holds NO secrets — the Mongo connection URI is supplied via the workflow's env block (sourced from the MDB_MCP_CONNECTION_STRING GH Actions secret) and inherited by the spawned MCP subprocess.  Only the literal MDB_MCP_READ_ONLY flag lives here.  ONLY read-only servers belong in this file — if your project's own .mcp.json wires any write-capable MCP server, it MUST NOT be loaded into a Tier-1 Observer process, which is why the workflow passes --strict-mcp-config (without it, --mcp-config is ADDITIVE and merges the project .mcp.json in).  The `command` is a direct binary invocation, not `npx -y mongodb-mcp-server@latest`: npx's cold-fetch + install + spawn (~10-22s on a small runner) exceeds the Claude CLI's MCP handshake timeout (~5-10s), which surfaced as the server stuck 'connecting' at session start.  The workflow's 'Pre-install mongodb-mcp-server' step globally-installs an exact-pinned version before the Claude step, so `mongodb-mcp-server` resolves on PATH with zero cold-start cost.",
+  "mcpServers": {
+    "mongo-ro": {
+      "type": "stdio",
+      "command": "mongodb-mcp-server",
+      "args": [],
+      "env": {
+        "MDB_MCP_READ_ONLY": "true"
+      }
+    }
+  }
+}
