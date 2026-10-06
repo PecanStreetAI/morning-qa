@@ -114,6 +114,18 @@ Secondary benefit: a pinned CLI also freezes the `stream-json` wire shape that
 `template/.github/scripts/qa_run_telemetry.js` parses, so the cost footer
 can't degrade overnight from a producer-side change.
 
+**Action pins are proposed, not applied, automatically.** A SHA pin that never
+moves is safe from tag rewrites but ages past security fixes. In this repo,
+`.github/dependabot.yml` opens one grouped weekly PR that bumps every `uses:`
+SHA and its `# vN` comment together across CI and the template workflows. It
+waits seven days after a release before proposing it, because these actions run
+next to the workflows' secrets. A human still merges each one.
+`tests/test_action_pins.py` fails if any action is unpinned or pinned to
+different SHAs in different workflows. Adopters copying `template/` should add
+an equivalent Dependabot entry for their own `.github/workflows/`. Dependabot
+cannot see the `npm install -g` and `pip install` pins inside `run:` blocks; those
+follow the manual procedure below.
+
 **To bump** (deliberate, never automatic): edit the version in
 `template/.github/workflows/morning-qa.yml`, read the release notes, ship it
 as its own PR, then confirm on the next daily run that skill loading,
