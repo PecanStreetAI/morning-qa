@@ -49,8 +49,11 @@ on:
 
 permissions:
   # The workflow writes ONE thing: a daily GitHub Issue.  Nothing else.
+  # Scoped PER JOB below: only post-issue gets `issues: write`.  run-qa
+  # (the job that runs the agent) gets a token that can READ issues and
+  # nothing more — so a prompt-injected or misbehaving agent cannot use
+  # its GH_TOKEN to write, whatever the skill's prose says.
   contents: read
-  issues:   write
 
 concurrency:
   # Never run two morning-QA jobs at once — if the cron fires while
@@ -69,6 +72,12 @@ jobs:
     # self-hosted, keep post-issue on ubuntu-latest (it needs `gh`), and
     # note the stale-/tmp and PATH caveats flagged in the steps below.
     runs-on: ubuntu-latest
+    # Read-only token for the job that runs the agent.  `issues: read`
+    # covers yesterday's-issue lookups (pre-compute + the skill's
+    # `gh issue view` fallback); posting is post-issue's job alone.
+    permissions:
+      contents: read
+      issues:   read
     # Hard cap — a killed run produces NO report (learned 2026-07-15: the
     # agent step ran past the then-20-min cap, GH cancelled it, and the
     # empty artifact tripped the critical "no report" fallback).  Bumped
@@ -166,8 +175,8 @@ jobs:
         # runs immediately before "Run morning QA skill", whose env block
         # carries ANTHROPIC_API_KEY, MDB_MCP_CONNECTION_STRING (the
         # read-only URI to your database — which may hold production
-        # data), API_ACCESS_KEY, ADMIN_API_KEY, SENTRY_AUTH_TOKEN and
-        # GH_TOKEN.  Unpinned, a compromised or account-takeover release
+        # data) and GH_TOKEN (the pre-compute step's probe keys sit in
+        # the same job, too).  Unpinned, a compromised or account-takeover release
         # reaches that secret-bearing environment within 24h with no repo
         # change to review and nothing in any diff to notice.  Every
         # `uses:` here is already SHA-pinned and the pip tooling above is
@@ -261,17 +270,22 @@ jobs:
         #   * timeout-minutes bounds this step so a hang can never eat the
         #     agent's budget (per-probe timeouts + a soft deadline inside
         #     the script are the inner guards; typical run is ~1-2 min).
-        # A broken pre-compute step degrades to exactly the
-        # pre-pre-compute behavior: every bundle block is absent/ERROR, so
-        # the agent runs each check's own probes from checks/NN-*.md.
+        # A broken pre-compute step degrades to the pre-pre-compute
+        # behavior for every check that needs no credential: its bundle
+        # block is absent/ERROR, so the agent runs that check's own probes
+        # from checks/NN-*.md.  A SECRET-GATED probe (Check 9's
+        # cron-health) cannot be re-run by the agent — its key is not in
+        # the agent's env — so that check reports ⏳ unavailable instead
+        # ("unavailable ≠ clean").
         #
-        # Env is a SUBSET of the agent step's: the same read-only probe
-        # secrets the agent's Bash already uses — deliberately NO
-        # ANTHROPIC_API_KEY and NO MDB_MCP_CONNECTION_STRING (Mongo stays
-        # on the read-only MCP, the agent's judgment path).  Secret
-        # posture is IMPROVED vs the agent probing: these run in a
-        # GH-secret-masked `run:` step, never entering the stream-json
-        # transcript that the agent's Bash command strings do.  The script
+        # This step is the ONLY holder of the probe credentials
+        # (API_ACCESS_KEY, ADMIN_API_KEY, SENTRY_*) — the agent step does
+        # not get them (see its env comment).  Deliberately NO
+        # ANTHROPIC_API_KEY and NO MDB_MCP_CONNECTION_STRING here (Mongo
+        # stays on the read-only MCP, the agent's judgment path).  These
+        # run in deterministic code in a GH-secret-masked `run:` step,
+        # never within reach of the model or the stream-json transcript
+        # that the agent's Bash command strings land in.  The script
         # passes secrets to curl via arg lists (never a shell echo) and
         # redacts known values from the bundle.
         continue-on-error: true
@@ -291,60 +305,52 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           python3 .github/scripts/qa_precompute.py \
-            || echo "pre-compute exited non-zero — agent self-gathers every check (fail-soft)"
+            || echo "pre-compute exited non-zero — agent self-gathers credential-free checks; secret-gated ones report unavailable (fail-soft)"
 
       - name: Run morning QA skill
+        # ── Secret posture: the agent's env is an ALLOWLIST ──────────────
+        # This step runs an LLM with unrestricted `Bash` over third-party
+        # text (dependency advisories, HTTP bodies, DB fields, yesterday's
+        # issue) — a prompt-injection surface.  Bash inherits this env
+        # block, so the skill's "never echo a credential" rules are
+        # discipline, not containment: an injected `curl` can send any var
+        # here off-box, and GH log-masking does nothing about that.  The
+        # only real control is what is NOT here.  So:
+        #   * Probe credentials (API_ACCESS_KEY, ADMIN_API_KEY, SENTRY_*)
+        #     live ONLY on the pre-compute step above, which is
+        #     deterministic code.  Their probes reach the agent as bundle
+        #     facts; when a secret-gated bundle block is not OK the check
+        #     reports ⏳ unavailable instead of re-probing.
+        #   * What remains is what the agent cannot work without, each
+        #     scoped to the least it can be.  Adding a var here is a
+        #     posture change: tests/test_workflow_pins.py pins the exact
+        #     set.  A new secret-gated check belongs in qa_precompute.py.
         env:
+          # Required to run the model at all.
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          # Same repo VARIABLE as the pre-compute step: the app origin
-          # the checks probe. Unset ⇒ app-facing checks self-skip.
+          # Same repo VARIABLE as the pre-compute step (not a secret): the
+          # app origin the checks probe.  Unset ⇒ app-facing checks
+          # self-skip.
           APP_BASE_URL: ${{ vars.APP_BASE_URL }}
-          # Optional — powers a Sentry-triage check if your roster adds
-          # one (the starter roster — Checks 0, 7, 9 — doesn't use them;
-          # a check whose credential is unset self-skips with a note).
-          SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
-          SENTRY_ORG_SLUG: ${{ secrets.SENTRY_ORG_SLUG }}
-          SENTRY_PROJECTS: ${{ secrets.SENTRY_PROJECTS }}
-          # Read-only API probes against your deployed app (sent as an
-          # X-Api-Key header).  Reusing the app's existing server-to-server
-          # key rather than minting a separate one avoids a multi-key
-          # refactor — and the skill's secret-handling rules already
-          # forbid echo/log of any *_KEY env var.
-          API_ACCESS_KEY: ${{ secrets.API_ACCESS_KEY }}
-          # 2026-05-23 — added to unblock Check 9 (cron heartbeats).
-          # Before this the check tried to connect to the app's Mongo
-          # directly and timed out (the runner has no Mongo URI on
-          # purpose); the check was marked skipped every morning.  The
-          # /admin/cron-health endpoint returns the stuck-job scan over
-          # HTTP, gated by the same X-Admin-Key the app's existing admin
-          # endpoints use.  Reusing the existing admin key avoids adding a
-          # new exfiltration surface for a Tier-1 read-only agent.
-          ADMIN_API_KEY: ${{ secrets.ADMIN_API_KEY }}
           # 2026-06-10 — powers the Mongo cross-check gate for Critical
           # findings (SKILL.md § "Mongo cross-check gate for Critical
           # findings", motivated by a false-alarm postmortem: an HTTP
           # probe's stale answer nearly paged the operator over a healthy
-          # system).  The value is the same read-only Mongo URI the
-          # operator uses locally; in CI it is provisioned as a GH Actions
-          # Secret.  The read-only Mongo MCP subprocess (spawned via the
+          # system).  The read-only Mongo MCP subprocess (spawned via the
           # pre-installed `mongodb-mcp-server` binary per .mcp.qa.json)
-          # inherits this var; the agent never sees the URI itself, only
-          # the typed MCP tool surface.  The skill's secret-handling rules
-          # (forbidden-idiom list — KEY/SECRET/TOKEN/PASSWORD/URI/PAT/
-          # CREDENTIAL/DSN/CONNECTION_STRING) already cover any accidental
-          # `echo $MDB_MCP_CONNECTION_STRING` — never `echo`, `env`, or
-          # `printenv` this value from any `run:` block.
+          # inherits this var.  ⚠️ So does the agent's Bash — the URI IS
+          # reachable from a shell, so it MUST be a credential for a
+          # database user with read-only roles (scoped to the databases
+          # the checks read).  MDB_MCP_READ_ONLY and the MCP's disabled
+          # tool list constrain the MCP path only; the database user's
+          # roles are the control that also binds Bash.  Never `echo`,
+          # `env`, or `printenv` this value from any `run:` block.
           MDB_MCP_CONNECTION_STRING: ${{ secrets.MDB_MCP_CONNECTION_STRING }}
-          # Give the Claude step its own GH_TOKEN so cross-day diff
-          # queries (`gh issue view <yesterday's issue>`) work from inside
-          # the skill, not just from the post-issue step.  The workflow's
-          # top-level permissions block already grants `issues: write` for
-          # posting today's body; the same token is sufficient for
-          # read-only diff queries inside the Claude step.  Without this,
-          # the agent reported "no prior baseline" for every check's
-          # delta.  (On a self-hosted runner without `gh` installed these
-          # queries degrade — the agent already treats "no prior baseline"
-          # as Info-level, not Warning.)
+          # Cross-day diff queries (`gh issue view <yesterday's issue>`)
+          # from inside the skill — without it the agent reported "no
+          # prior baseline" for every check's delta.  This job's token is
+          # `issues: read` (see run-qa's permissions block), so it can read
+          # yesterday's issue and cannot write anything.
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           # Claude Code CLI invocation — the flags below each encode a
@@ -381,10 +387,13 @@ jobs:
           #     Tier-1 agent must never even attempt a mutating call, so
           #     it stays `[]` on every healthy run.  Empty means "nothing
           #     was attempted".  The init tool list is the evidence.
-          #     Residual: non-allow-listed verbs of the LOADED MCP servers
-          #     (mongodb-logs, export, db-stats, …) remain callable — the
-          #     allowlist is pre-approval, not restriction.  Locking the
-          #     verb surface needs per-verb `--disallowed-tools` entries.
+          #     The MCP verb surface is locked SERVER-side instead:
+          #     .mcp.qa.json sets MDB_MCP_DISABLED_TOOLS so the server
+          #     never registers any verb outside the five below
+          #     (mongodb-logs, export, db-stats, connect, … are absent,
+          #     not merely un-approved).  Re-verify after a
+          #     mongodb-mcp-server bump: the init event's tool list must
+          #     show exactly the five mcp__mongo-ro__ verbs.
           #   * `--mcp-config .mcp.qa.json` loads ONLY read-only servers
           #     (the mongo-ro server, read-only by design via
           #     MDB_MCP_READ_ONLY=true).
@@ -548,6 +557,10 @@ jobs:
     needs: run-qa
     if: always()  # Post even if run-qa failed; fallback body still uploaded
     timeout-minutes: 10
+    # The only job with a writing token.  No model runs here.
+    permissions:
+      contents: read
+      issues:   write
 
     steps:
       - name: Checkout repo

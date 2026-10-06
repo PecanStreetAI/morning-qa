@@ -56,8 +56,12 @@ mechanism: the CLI's `--allowed-tools` is a *pre-approval list, not a
 restriction* (a lesson the production instance learned when an off-list tool
 ran anyway), so what actually makes Tier 1 read-only is the
 `--disallowed-tools` blocklist plus `--strict-mcp-config` (only the dedicated
-read-only MCP config loads), with the skill's hard constraints layered on
-top. A tier change is a change to those flags, recorded in
+read-only MCP config loads, and that config disables every Mongo verb outside
+the five the skill needs), with the skill's hard constraints layered on
+top. Because the agent still has `Bash`, containment also rests on what it
+*holds*: the job that runs it gets an `issues: read` token, and probe
+credentials stay in the deterministic pre-compute step rather than the
+agent's environment. A tier change is a change to those flags, recorded in
 [docs/promotion_criteria.md](docs/promotion_criteria.md) — the only place a
 tier change is valid. Promotion runs through quantitative
 gates (≥14 consecutive days with no false-positive Critical, ≥3

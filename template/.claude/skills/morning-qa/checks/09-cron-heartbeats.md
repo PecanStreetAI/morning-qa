@@ -6,8 +6,10 @@ _Last reviewed: 2026-08-27_
 > pre-step into `/tmp/qa-precompute/bundle.md` (see SKILL.md § "Pre-computed
 > inputs").  When this check's block is `OK`, use those facts — but the
 > **Mongo cross-check gate for any stuck row you'd classify Critical stays YOURS**
-> (the bundle never pre-runs Mongo).  The HTTP probe below is the FALLBACK for a
-> `SKIPPED`/`ERROR`/absent block.
+> (the bundle never pre-runs Mongo).  The HTTP probe below is **pre-compute
+> only**: `ADMIN_API_KEY` is deliberately NOT in the agent's environment, so for
+> a `SKIPPED`/`ERROR`/absent block do not re-probe — report this check ⏳
+> unavailable with the bundle's tag as the reason (never clean).
 
 ## Why this check exists
 
@@ -45,7 +47,10 @@ credentials.
 
 1. Fetch the stuck-job summary via the **HTTP endpoint** (built in
    production precisely to let this check run in CI without Mongo
-   creds — see "Why HTTP probe AND Mongo cross-check" below):
+   creds — see "Why HTTP probe AND Mongo cross-check" below).  The
+   pre-compute step makes this call and the agent reads the result
+   from the bundle; the request is shown here as the endpoint
+   contract:
 
    ```
    GET https://staging.example.com/admin/cron-health
