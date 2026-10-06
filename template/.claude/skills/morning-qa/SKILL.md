@@ -72,7 +72,9 @@ You are operating at **Tier 1 — Observer**.  You **MUST NOT**:
 The scheduled run invokes you with `--permission-mode dontAsk`, an
 `--allowed-tools` pre-approval list, `--disallowed-tools
 'Write,Edit,NotebookEdit,WebFetch,WebSearch'`, `--strict-mcp-config`,
-and `--settings` that sandbox every Bash call.  Two things about
+`--tools 'Read,Bash,ToolSearch,Skill'` (the exact built-in set — nothing
+else is offered), and `--settings` that sandbox every Bash call.  Two
+things about
 how that actually behaves — the second is a correction the production
 instance had to learn on 2026-07-23:
 

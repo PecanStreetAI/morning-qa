@@ -467,6 +467,15 @@ jobs:
           #     probes use `curl` in the sandbox instead.  Prove the
           #     sandbox on a new CLI pin or runner image with the
           #     framework repo's "Sandbox canary" workflow.
+          #   * `--tools` is the EXACT built-in tool set, an allowlist —
+          #     unlike --disallowed-tools, a tool a future CLI version adds
+          #     is off unless listed.  The canary's first run (2026-10-06)
+          #     showed the CLI otherwise offers Monitor, Workflow, Task,
+          #     CronCreate, SendMessage, … — some run shell commands by
+          #     their own path, which the Bash sandbox may not cover.
+          #     ToolSearch only loads the deferred mongo-ro schemas; Skill
+          #     only loads skill instructions.  Neither executes anything.
+          #     MCP tools are not built-ins and are unaffected.
           set -o pipefail
           # A settings failure (e.g. a malformed APP_BASE_URL) must not
           # start the agent unsandboxed — and must not skip the
@@ -479,6 +488,7 @@ jobs:
               --mcp-config .mcp.qa.json \
               --strict-mcp-config \
               --settings "$SANDBOX_SETTINGS" \
+              --tools 'Read,Bash,ToolSearch,Skill' \
               --allowed-tools 'Read,Bash,mcp__mongo-ro__count,mcp__mongo-ro__find,mcp__mongo-ro__aggregate,mcp__mongo-ro__collection-schema,mcp__mongo-ro__list-collections' \
               --disallowed-tools 'Write,Edit,NotebookEdit,WebFetch,WebSearch' \
               2>&1 | tee /tmp/claude-stdout.log \

@@ -12,7 +12,8 @@ echo PROBE x=open || echo PROBE x=blocked`), so scanning the whole log — the
 tool_use inputs included — would "find" both and prove nothing.
 
 The init event's tool list is checked too: WebFetch and WebSearch run inside
-the CLI process, outside the sandbox's network rules, so they must be absent.
+the CLI process, outside the sandbox's network rules, so they must be absent,
+and no built-in tool beyond production's exact `--tools` set may be offered.
 """
 
 import json
@@ -35,6 +36,13 @@ EXPECTED = {
 }
 
 FORBIDDEN_TOOLS = ("WebFetch", "WebSearch")
+
+# The ONLY built-in tools the agent may be offered — production's exact
+# `--tools` value (tests pin the two in lockstep).  MCP tools (`mcp__*`) are
+# not built-ins and are excluded from this check.  Anything else in the init
+# event means `--tools` stopped restricting: some built-ins (Monitor,
+# Workflow, ...) run shell commands by their own path, outside Bash.
+ALLOWED_TOOLS = ("Read", "Bash", "ToolSearch", "Skill")
 
 
 def _result_texts(event):
@@ -80,6 +88,14 @@ def judge(probes, init_tools):
     else:
         for tool in FORBIDDEN_TOOLS:
             results.append((tool not in init_tools, f"{tool} absent from the agent's tools"))
+        extra = sorted(
+            t for t in init_tools if t not in ALLOWED_TOOLS and not t.startswith("mcp__")
+        )
+        results.append((
+            not extra,
+            "no built-in tool beyond " + ",".join(ALLOWED_TOOLS)
+            + (f" (also offered: {', '.join(extra)})" if extra else ""),
+        ))
     for name, (ok, desc) in EXPECTED.items():
         if name not in probes:
             results.append((False, f"{desc}: probe `{name}` never reported (agent skipped it?)"))

@@ -175,6 +175,20 @@ def test_canary_uses_productions_cli_model_and_tool_flags():
     assert "--strict-mcp-config" in can
 
 
+def test_exact_tool_set_is_the_same_in_production_canary_and_judge():
+    """`--tools` is an allowlist of built-ins: a tool a future CLI adds stays
+    off.  The canary's first run (2026-10-06) showed the default set includes
+    Monitor and Workflow, which run shell commands by their own path."""
+    prod = _quoted_flag(WORKFLOW.read_text(encoding="utf-8"), "--tools")
+    can = _quoted_flag(CANARY_WORKFLOW.read_text(encoding="utf-8"), "--tools")
+    assert prod == can == set(canary.ALLOWED_TOOLS), (prod, can, canary.ALLOWED_TOOLS)
+    for tool in ("Monitor", "Workflow", "Task", "WebFetch", "WebSearch", "Write", "Edit"):
+        assert tool not in prod, f"{tool} must not be in the agent's tool set"
+    assert "Bash" in prod and "ToolSearch" in prod, (
+        "Bash runs the checks; ToolSearch loads the deferred mongo-ro verbs"
+    )
+
+
 def test_canary_runs_productions_scripts_and_judges_the_result():
     wf = _canary()
     triggers = wf.get("on", wf.get(True))  # PyYAML reads a bare `on:` key as True
@@ -260,6 +274,12 @@ def test_judge_fails_a_skipped_probe_and_a_missing_init():
 
 def test_judge_fails_when_webfetch_is_offered():
     assert not _ok(_log(_GOOD, tools=("Bash", "WebFetch")))
+
+
+def test_judge_fails_any_builtin_beyond_the_exact_set_but_allows_mcp_tools():
+    assert not _ok(_log(_GOOD, tools=("Bash", "Read", "Monitor")))
+    assert not _ok(_log(_GOOD, tools=("Bash", "Workflow")))
+    assert _ok(_log(_GOOD, tools=("Bash", "Read", "ToolSearch", "Skill", "mcp__mongo-ro__count")))
 
 
 def test_judge_ignores_markers_outside_tool_results():
