@@ -528,6 +528,9 @@ def test_canary_reads_a_dummy_environ_never_its_own():
     assert "/proc/self" not in run
     prompt = re.search(r'claude -p "([^"]*)"', run).group(1)
     assert canary.DUMMY_MARKER not in prompt, "the marker must reach the log only through a Read"
+    # Run #3 (2026-10-06): told only "Read /proc/<pid>/environ", the model
+    # declined it as a likely secret grab and the judge failed the run.
+    assert "dummy process" in prompt and "FAILS if you skip them" in prompt
 
 
 # ── Collecting the report out of the agent dir ──────────────────────────────
