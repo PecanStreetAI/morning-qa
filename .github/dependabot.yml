@@ -39,3 +39,18 @@ updates:
           - "*"
     commit-message:
       prefix: ci
+
+  # requirements-dev.txt: this repo's own test + lint tooling (pytest,
+  # pyyaml, detect-secrets, shellcheck-py).  Same cadence and cooldown.
+  - package-ecosystem: pip
+    directory: "/"
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    groups:
+      dev-tooling:
+        patterns:
+          - "*"
+    commit-message:
+      prefix: ci

@@ -167,6 +167,14 @@ in more than one place (a check spec, this catalog, the script). The tests in
 time instead of surfacing as doc drift weeks later. The documentation is part
 of the machine, and the tests hold it to that.
 
+To run them locally (the same pinned tooling CI uses):
+
+```bash
+pip install -r requirements-dev.txt
+python -m pytest tests/
+git ls-files -z '*.sh' | xargs -0 shellcheck
+```
+
 ## What ships here
 
 Three worked-example checks, chosen because they generalize to almost any
@@ -211,6 +219,7 @@ docs/                         ← the design record: design, check catalog,
                                 case_studies/
 tests/                        ← the lockstep pins (spec ↔ catalog ↔ script)
 scripts/denylist_scan.sh      ← the sanitization backstop (see PORTING.md)
+requirements-dev.txt          ← pinned test + lint tooling (CI installs this)
 ```
 
 `template/` is a template, not an installation: the workflows live under
