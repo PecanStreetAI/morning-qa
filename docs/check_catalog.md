@@ -109,6 +109,12 @@ allowlist — the tests in `tests/` enforce that direction (the shipped catalog
 carries no real ids, so start the lockstep from the check file when you add
 your first entry).
 
+**Pre-compute only:** every probe above needs the npm registry or PyPI, which
+the agent's sandbox refuses (both accept uploads, so either would be an
+exfiltration channel). When the pre-compute block is not `OK`, the agent
+reports those halves ⏳ unavailable (🟡 Warning), never clean. The allowlist
+suppression and its re-verify greps stay the agent's.
+
 **CI-tool advisories are Warning, not Critical:** these installers are
 dev/CI-only, never shipped to a user. Bumping stays the deliberate human step
 (the BUMP LOG discipline in [design.md](design.md)).

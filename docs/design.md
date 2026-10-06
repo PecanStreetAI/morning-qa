@@ -95,6 +95,46 @@ GitHub Actions wins because:
   which anyone holding their own API key can use to store data and read it
   back. Settings: `template/.github/scripts/qa_sandbox_settings.py`. Live
   proof: the repo's manual **Sandbox canary** workflow.
+* What the sandbox lets a command **write** matters as much as where it can
+  connect, because the steps after the agent run unsandboxed. The agent's
+  commands may write only `/tmp/qa-agent` (re-created empty and 0700 each
+  run); the checkout — including the scripts later steps execute and
+  `.git/hooks` — `~/.claude`, and the paths the sandbox runtime would open
+  on its own (`/tmp/claude`, `~/.npm/_logs`) are read-only. Not all of
+  `/tmp`: later steps write fixed `/tmp` paths, and a symlink planted there
+  would redirect those writes anywhere the runner user can write. The
+  report crosses out through `qa_collect_report.py`, which refuses links and
+  non-files, caps the size, and writes a fresh file of its own. The
+  checkout keeps no token (`persist-credentials: false`), and the `Read`
+  tool is denied `/proc/**/environ`, so it cannot read the CLI's own API key.
+* The allowlist holds only the app origin. Package registries are left off
+  on purpose: npm and PyPI accept uploads, so either would carry anything
+  the agent reads (Mongo rows included) off the runner with no credential.
+  Check 7's registry probes run in the pre-compute step instead.
+* **Residuals**, stated plainly:
+  * The `Read` tool runs in the CLI process, outside the sandbox. Apart
+    from the `/proc/**/environ` deny it reads what the runner user can, and
+    it may follow a symlink the agent creates inside `/tmp/qa-agent`. It
+    has no network, so what it reads can leave only through the model's
+    own output (the report, the log) or an allowlisted host.
+  * The CLI's temp files live in the agent-writable `/tmp/qa-agent/tmp`
+    (`CLAUDE_CODE_TMPDIR`), and the settings' cache variables
+    (`XDG_CACHE_HOME`, `npm_config_cache`) reach the unsandboxed CLI and MCP
+    server as well as the agent's commands. So the agent's commands can read
+    and replace files those processes keep there, and could plant a symlink
+    at a name one of them is about to write. If that process wrote a
+    predictable name without refusing links, the write would land wherever
+    the link points, outside the sandbox. We have not seen either do this;
+    the canary does not prove they don't.
+  * Whether `Read` follows a symlink into `/proc/<pid>/environ` is reported
+    (INFO, not a failure) by the canary: look for the `Read via a symlink`
+    line in its judge output.
+  * The app origin stays reachable, and the read-only MCP gives the agent
+    the database. Anything the app accepts on a write endpoint is a way
+    out; keep the app's write endpoints behind credentials the agent does
+    not hold.
+  * An empty allowlist (no `APP_BASE_URL`) is not what the canary runs; it
+    always sets an app host.
 * Promotion to Tier 2 later is an incremental change — add `Edit` and an
   auto-PR workflow step — not a re-platform.
 * Cost is bounded and observable: the model is pinned in the workflow, and
@@ -235,7 +275,8 @@ point, not a promise.)
   `template/.github/scripts/qa_run_telemetry.js`), so drift is visible the
   morning it happens.
 * The footer is **best-effort observability, not an integrity boundary**: it
-  parses a log writable by the same OS user the agent's Bash tool runs as, so
+  parses a log full of text the agent chose (its messages, its commands'
+  output; the sandbox stops its commands writing the file itself), so
   it reliably catches *accidental* drift (the failure mode that actually
   occurred) but a hijacked agent could in principle forge it. Your Anthropic
   Console / invoice remains the source of truth for cost auditing — a clean

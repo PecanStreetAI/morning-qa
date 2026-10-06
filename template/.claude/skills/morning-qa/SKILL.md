@@ -103,25 +103,32 @@ and your own discipline.  Concretely:
   pre-compute step (their probes reach you as bundle facts, §
   "Pre-computed inputs"), and the secrets the CLI and the MCP server
   need are unset inside the sandbox — and it can reach only your app's
-  host (`APP_BASE_URL`), `registry.npmjs.org` and `pypi.org`.  Any other
-  host is refused.  A refused connection is the sandbox, **not** a
+  host (`APP_BASE_URL`).  Any other host is refused, package registries
+  (npm, PyPI) included.  A refused connection is the sandbox, **not** a
   finding about that host: report the probe as ⏳ unavailable and move
   on.  This is deliberate containment — you read third-party text all
   day — so never try to work around it (no other tools, no alternate
   hosts, no proxies), and do not ask the operator to add a credential
   or a domain.
+* **Bash can write only `/tmp/qa-agent/`.**  The repository checkout,
+  your home directory and the rest of `/tmp` are read-only to your
+  commands.  Your report goes to `/tmp/qa-agent/qa-report.md` and any
+  scratch file under `/tmp/qa-agent/`; the workflow copies the report
+  out after you finish.  A write that fails elsewhere is the sandbox,
+  not a finding — and a tool that wants a cache or a temp file already
+  has one under `/tmp/qa-agent/`.
 * **`Write`, `Edit`, `NotebookEdit` are removed from your context** —
   you should not see them.  Their absence is still not your safety net:
   the Tier-1 hard constraints bind regardless, and `Bash` can write
   files either way.  Create every file you need — the incremental
-  `/tmp/qa-report.md` (§ Output protocol) **and** any `/tmp` scratch
+  `/tmp/qa-agent/qa-report.md` (§ Output protocol) **and** any `/tmp/qa-agent/` scratch
   script — with **Bash** (a `cat > file <<'EOF'` heredoc, or `printf`).
 * **Never write agent-memory files — and note `Bash` can still do it.**
   Writing to `~/.claude/**` memory or project-notes files is an
   interactive-session habit that does not apply here.  A self-hosted
   runner keeps its filesystem between runs, so such a write silently
   accumulates cross-run state on the box.  Tier-1 is report-only; your
-  entire output is `/tmp/qa-report.md`.  (A 2026-07 production run did
+  entire output is `/tmp/qa-agent/qa-report.md`.  (A 2026-07 production run did
   exactly this — two files landed in the agent's memory directory on
   the runner, back when the Write tool was still available.)
 * **`ToolSearch` IS required for the MCP verbs — they are deferred.**
@@ -216,7 +223,9 @@ You **MAY**:
 * Read any file in the repo.
 * Run read-only Bash: `grep`, `find`, `ls`, `cat`, `wc`, `git log`,
   `git diff`, `git status`, `git blame`, `pytest --collect-only`,
-  `npm outdated`, `pip list --outdated`, `npm audit`, `df`, `du`.
+  `df`, `du`.  (`npm outdated`, `pip list --outdated`, `pip-audit` and
+  `npm audit` need a registry your sandbox refuses; Check 7 reads their
+  results from the bundle.)
 * Make outbound HTTP GETs (with `curl`, from the sandbox) to:
   * `https://example.com/health` (substitute your app's base URL —
     the workflow supplies it; this doc uses `example.com` /
@@ -229,10 +238,10 @@ You **MAY**:
     environment; read their results from the bundle.  If a block you
     need is not `OK`, the check is ⏳ unavailable (rule 2 of §
     "Pre-computed inputs") — do not call these endpoints yourself.
-  * `https://registry.npmjs.org/*` — anonymous; used ONLY by Check
-    7's CI-toolchain-pin fallback probes.
-  * `https://pypi.org/*` — anonymous; used by Check 7's `pip list
-    --outdated` / `pip-audit` fallback.
+  * Package registries (`registry.npmjs.org`, `pypi.org`) are **not**
+    reachable: they accept uploads, so they would be a way off-box for
+    anything you read.  Check 7's registry facts come only from the
+    bundle; when its block is not `OK`, those parts are ⏳ unavailable.
   * GitHub is **not** reachable from your sandbox and you hold no
     GitHub token: yesterday's issue reaches you only through the
     bundle (§ "Before running").
@@ -299,12 +308,13 @@ Then:
 2. For a check tagged **SKIPPED / ERROR** — or if the whole file is
    **absent** (the pre-compute step failed) — run that check's own
    probes from `checks/NN-*.md` as documented.  Those steps are the
-   fallback path for every probe that needs no credential.
-   **Exception — secret-gated probes** (Check 9's
-   `/admin/cron-health`): the key is not in your environment, so you
-   cannot re-run them.  Report that check ⏳ **unavailable** with the
-   bundle's tag as the reason — never as clean, and never by trying
-   to reach the endpoint without its key.
+   fallback path for every probe that needs neither a credential nor a
+   host your sandbox refuses.
+   **Exception — pre-compute-only probes** (Check 9's secret-gated
+   `/admin/cron-health`; Check 7's registry and audit probes, whose
+   hosts are outside your sandbox): you cannot re-run them.  Report
+   that part ⏳ **unavailable** with the bundle's tag as the reason —
+   never as clean, and never by trying another route to the endpoint.
 3. The bundle also carries **yesterday's QA issue** (`## YESTERDAY`) —
    your only source for the self-feedback calibration below (you have
    no GitHub token and GitHub is outside your sandbox).
@@ -647,7 +657,7 @@ requested time series this way: 100 complete, correct, plausible
 
 Build a single Markdown string in this exact shape, then post it as a
 GitHub Issue body (the workflow handles the `gh issue create` call —
-you just produce the body text and write it to `/tmp/qa-report.md`).
+you just produce the body text and write it to `/tmp/qa-agent/qa-report.md`).
 
 This is the shape of the FINAL write (§ Output protocol step 3) —
 hence `**Status:** ✅ Complete` and a marker that is never `unknown`.
@@ -739,10 +749,10 @@ only; their off-day `—` stub rows do not advance `k`.  Keep the same
 
 ## Output protocol
 
-`/tmp/qa-report.md` is a **LIVE document**, not something you write
+`/tmp/qa-agent/qa-report.md` is a **LIVE document**, not something you write
 once at the end.  The run can be cut off at ANY instant — a transient
 API drop (`API Error: Connection closed mid-response`) or the
-workflow's hard timeout — and **whatever is in `/tmp/qa-report.md` at
+workflow's hard timeout — and **whatever is in `/tmp/qa-agent/qa-report.md` at
 that moment becomes the posted GitHub Issue.**  Writing it only at the
 end means a single late hiccup discards the entire run.  That is
 exactly what happened to the production instance on 2026-07-15: the
@@ -753,7 +763,7 @@ completed work lost.
 So write it INCREMENTALLY — it must be a valid, self-contained report
 at every step:
 
-1. **Before Check 0**, write an initial `/tmp/qa-report.md`:
+1. **Before Check 0**, write an initial `/tmp/qa-agent/qa-report.md`:
 
    ```
    <!-- qa-max-severity: unknown -->
@@ -768,7 +778,7 @@ at every step:
    2026-08-06 production run that completed ZERO checks
    byte-indistinguishable, at the label layer, from a clean full day.
 
-2. **After EACH check completes**, REWRITE `/tmp/qa-report.md` in full
+2. **After EACH check completes**, REWRITE `/tmp/qa-agent/qa-report.md` in full
    so it stands alone as a complete report of everything done so far:
    * first-line severity marker = the HIGHEST severity across the
      checks completed so far, **floored at `unknown`** — while Status
@@ -789,8 +799,8 @@ at every step:
 3. **After the LAST check**, do the final full write: flip Status to
    `✅ Complete`, add the headline + count summary, set the severity
    marker to the true maximum, then print the headline + counts to
-   stdout and STOP.  The workflow's post-issue step consumes
-   `/tmp/qa-report.md` as the Issue body — you do NOT call `gh`
+   stdout and STOP.  The workflow copies `/tmp/qa-agent/qa-report.md`
+   out of the sandbox and its post-issue step posts it as the Issue body — you do NOT call `gh`
    yourself.
 
 A **partial** report (Status still `⏳ In progress (k/{N})`) is a
@@ -798,7 +808,7 @@ SUCCESS, not a failure: it tells the operator exactly how far the run
 got and surfaces every finding collected before the cutoff.  Never
 hold a finding back waiting for a "clean" final write.
 
-The **first line** of `/tmp/qa-report.md` MUST be the machine-readable
+The **first line** of `/tmp/qa-agent/qa-report.md` MUST be the machine-readable
 severity marker (an HTML comment — invisible in the rendered Issue):
 
     <!-- qa-max-severity: unknown -->    run still IN PROGRESS — nothing established yet

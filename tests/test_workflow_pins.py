@@ -319,7 +319,8 @@ def test_skill_and_check_9_do_not_send_the_agent_after_missing_keys():
     for doc, label in ((skill, "SKILL.md"), (spec9, "checks/09")):
         assert "-H \"X-Api-Key: $API_ACCESS_KEY\"" not in doc, label
         assert "pre-compute" in doc.lower(), label
-    assert "Exception — secret-gated probes" in skill
+    assert "Exception — pre-compute-only probes" in skill
+    assert "Check 9's secret-gated" in skill
     assert "you hold no GitHub token" in skill
     assert "ADMIN_API_KEY` is deliberately NOT in the agent's environment" in spec9
 
