@@ -7,7 +7,8 @@
 # judges the log with qa_sandbox_canary.py.  Green means: unlisted hosts are
 # refused, the allowlisted registry works, the secrets are absent from the
 # agent's commands and from every process they can see, /tmp is writable,
-# settings paths are not, and WebFetch/WebSearch are not offered.
+# settings paths are not, and the agent is offered no built-in tool beyond
+# production's exact `--tools` set.
 #
 # Needs ONE repository secret: ANTHROPIC_API_KEY.  The other "secrets" below
 # are dummy values that exist only so the probes can check they are hidden.
@@ -66,6 +67,7 @@ jobs:
             --permission-mode dontAsk \
             --strict-mcp-config \
             --settings "$SETTINGS" \
+            --tools 'Read,Bash,ToolSearch,Skill' \
             --allowed-tools 'Bash' \
             --disallowed-tools 'Write,Edit,NotebookEdit,WebFetch,WebSearch' \
             --max-turns 6 \
