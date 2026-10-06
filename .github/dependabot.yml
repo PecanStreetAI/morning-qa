@@ -1,0 +1,41 @@
+# Dependabot keeps the SHA-pinned GitHub Actions current.
+#
+# Every `uses:` in this repo is pinned by full commit SHA with a `# vN`
+# comment (the unattended-install reasoning in docs/design.md).  A pin
+# that never moves is safe from tag-rewrite attacks but silently ages past
+# security fixes; Dependabot bumps the SHA and the comment together, as a
+# reviewable PR, so pins stay both immutable and current.
+#
+# Two directories, ONE grouped PR:
+#   * "/" scans this repo's own .github/workflows/ (CI).
+#   * "/template" — for any directory other than "/",
+#     Dependabot scans the YAML files in that directory itself, not a
+#     .github/workflows/ beneath it, so the full path is required
+#     ("/template" alone would find nothing).
+# The group keeps every action at one version across both trees, which
+# tests/test_action_pins.py enforces — a PR bumping only one tree would
+# fail that test.
+#
+# NOT covered: the `npm install -g` (Claude Code CLI, mongodb-mcp-server)
+# and `pip install` pins inside `run:` blocks.  Dependabot cannot see
+# them; bump those by hand (the workflow comments say how to vet a bump).
+
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directories:
+      - "/"
+      - "/template/.github/workflows"
+    schedule:
+      interval: weekly
+    # Wait a week after a release before proposing it: a compromised or
+    # yanked release is usually caught within days, and these actions run
+    # next to the workflows' secrets.
+    cooldown:
+      default-days: 7
+    groups:
+      github-actions:
+        patterns:
+          - "*"
+    commit-message:
+      prefix: ci

@@ -44,6 +44,10 @@ TEMPLATE = REPO / "template"
 
 WORKFLOW = TEMPLATE / ".github/workflows/morning-qa.yml"
 RETRO_WORKFLOW = TEMPLATE / ".github/workflows/qa-ledger-retro.yml"
+CI_WORKFLOW = REPO / ".github/workflows/ci.yml"
+DEPENDABOT_CONFIG = REPO / ".github/dependabot.yml"
+# Every workflow file whose `uses:` pins Dependabot maintains.
+ALL_WORKFLOWS = (CI_WORKFLOW, WORKFLOW, RETRO_WORKFLOW)
 SEV_SCRIPT = TEMPLATE / ".github/scripts/qa_severity_label.sh"
 PRECOMPUTE_SCRIPT = TEMPLATE / ".github/scripts/qa_precompute.py"
 TELEMETRY_SCRIPT = TEMPLATE / ".github/scripts/qa_run_telemetry.js"
@@ -379,3 +383,21 @@ def all_run_steps(doc):
         for s in j.get("steps") or []
         if s.get("run")
     ]
+
+
+# ── Action pins (`uses:` lines) ─────────────────────────────────────────────
+_USES_RE = re.compile(r"^\s*(?:-\s+)?uses:\s*(\S+)(.*)$")
+
+
+def action_pins(path):
+    """[(lineno, action, ref, trailing_comment)] for every `uses:` line in a
+    workflow file.  Text-level on purpose: the `# vN` comment Dependabot
+    rewrites alongside the SHA is invisible to a YAML parser."""
+    pins = []
+    for n, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+        m = _USES_RE.match(line)
+        if not m:
+            continue
+        action, _, ref = m.group(1).partition("@")
+        pins.append((n, action, ref, m.group(2).strip()))
+    return pins
