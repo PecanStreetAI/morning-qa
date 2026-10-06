@@ -27,8 +27,14 @@ the agent** — the Tier-1 posture is unchanged.
 **Pre-computed** (shell / HTTP / git / package tooling — no new credential
 surface): checks **0, 7, 9** — the full shipped roster — plus yesterday's QA
 issue (which otherwise costs the agent a multi-turn hunt) and secret-presence
-booleans. The step uses the SAME env vars the agent's Bash already uses
-(`API_ACCESS_KEY`, `ADMIN_API_KEY`, `SENTRY_*`, the GitHub token).
+booleans. The step is the ONLY holder of the probe credentials
+(`API_ACCESS_KEY`, `ADMIN_API_KEY`, `SENTRY_*`); the agent step does not get
+them. The agent runs unrestricted `Bash` over third-party text, so anything in
+its env is reachable by a prompt injection — keeping probe keys in deterministic
+code is the containment. Consequence: a credential-free check whose block is
+`SKIPPED`/`ERROR` falls back to the agent's own probes, but a secret-gated one
+(Check 9) is reported ⏳ unavailable. A new secret-gated check belongs in
+`qa_precompute.py`, not in the agent's env.
 
 **Stays with the agent** (judgment / MCP-gated, never in the bundle):
 

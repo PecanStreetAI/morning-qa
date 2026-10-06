@@ -94,6 +94,14 @@ and your own discipline.  Concretely:
 
 * You have **Read, Bash, WebFetch**, and the read-only `mongo-ro` MCP
   verbs.  That is everything the shipped checks need.
+* **Your environment holds no probe credentials.**  `API_ACCESS_KEY`,
+  `ADMIN_API_KEY` and `SENTRY_*` exist only in the pre-compute step;
+  their probes reach you as bundle facts (§ "Pre-computed inputs").
+  Your env carries only `ANTHROPIC_API_KEY`, `APP_BASE_URL`, the
+  read-only `MDB_MCP_CONNECTION_STRING` (for the MCP server) and an
+  `issues: read` `GH_TOKEN`.  This is deliberate containment — your
+  Bash inherits that env and you read third-party text all day — so
+  do not hunt for, or ask the operator to add, any other credential.
 * **`Write`, `Edit`, `NotebookEdit` are removed from your context** —
   you should not see them.  Their absence is still not your safety net:
   the Tier-1 hard constraints bind regardless, and `Bash` can write
@@ -209,37 +217,30 @@ You **MAY**:
     the workflow supplies it; this doc uses `example.com` /
     `staging.example.com` as placeholders throughout) — anonymous;
     no header needed.
-  * Key-gated app API endpoints — **REQUIRES** the header
-    `X-Api-Key: $API_ACCESS_KEY` on every request; without it you get
-    HTTP 403 and the check is blind.  The env var is set by the
-    workflow; reference it inline as `-H "X-Api-Key: $API_ACCESS_KEY"`
-    in curl invocations.  **NEVER** print, log, or echo the value of
-    `$API_ACCESS_KEY` itself — only use it inside the header argument.
-  * `https://staging.example.com/admin/cron-health` — **REQUIRES**
-    the header `X-Admin-Key: $ADMIN_API_KEY`.  Used ONLY by Check 9
-    (job heartbeats).  This is the sole `/admin/*` path permitted
-    under Tier 1 — every other admin route is gated to higher tiers.
-    The endpoint is read-only by design and returns no PII.  Apply
-    the same "NEVER print, log, or echo" rule to `$ADMIN_API_KEY` as
-    to `$API_ACCESS_KEY` above.
+  * Key-gated app endpoints (`X-Api-Key`) and
+    `https://staging.example.com/admin/cron-health` (`X-Admin-Key`,
+    Check 9 — the sole `/admin/*` path in Tier 1's scope) are probed
+    by the **pre-compute step only**.  Their keys are not in your
+    environment; read their results from the bundle.  If a block you
+    need is not `OK`, the check is ⏳ unavailable (rule 2 of §
+    "Pre-computed inputs") — do not call these endpoints yourself.
   * `https://registry.npmjs.org/*` — anonymous; used ONLY by Check
     7's CI-toolchain-pin fallback probes.
   * `https://api.github.com/*` — via `Authorization: Bearer
     $GH_TOKEN`, the workflow's ephemeral Actions token; it is what
     the pre-compute's `## YESTERDAY` lookup authenticates with.
-    **GET only** — the token also carries `issues: write` (the
-    post-issue job needs it), so a mistyped verb here would actually
-    succeed — Tier 1 reads, never writes.  If your repo is private,
+    **GET only** — your job's token is scoped `issues: read`
+    (posting happens in a separate job with its own token), so a
+    write verb would be rejected; Tier 1 reads, never writes,
+    regardless.  If your repo is private,
     an unauthenticated call 404s rather than degrading gracefully —
     always authenticate.
 * Call these specific `mongo-ro` MCP tools (they power the
   Critical-finding cross-check gate — see § "Mongo cross-check gate
-  for Critical findings" below).  These five are the read-only surface
-  you should use.  ⚠️ They are PRE-APPROVED (run without a prompt) via
-  `--allowed-tools` — that flag does NOT reject the others (it is a
-  pre-approval list, not a restriction; see § "CI tool surface"
-  above).  Use only these five regardless; that discipline, not the
-  CLI, is what keeps the surface read-only:
+  for Critical findings" below).  These five are the ENTIRE `mongo-ro`
+  surface: `.mcp.qa.json` sets `MDB_MCP_DISABLED_TOOLS` so the server
+  registers no other verb (`--allowed-tools` alone would only
+  pre-approve, not restrict — see § "CI tool surface" above):
   * `mcp__mongo-ro__count` — count documents matching a filter.
     PRIMARY verifier; the gate's default verb.
   * `mcp__mongo-ro__find` — fetch matching documents.  Use only when
@@ -256,9 +257,10 @@ You **MAY**:
   * `mcp__mongo-ro__list-collections` — enumerate collections.
     Diagnostic only.
 
-  Do NOT call these (they may be loaded but are NOT pre-approved, and
-  the ban is on you to honor): `mongodb-logs`, `export`, `db-stats`,
-  `collection-storage-size`, `aggregate-db`, `explain`,
+  Do NOT call these (the server config disables them, so they should
+  not appear at all — if one does, the config has drifted: report it
+  as a 🟡 finding and still do not call it): `mongodb-logs`, `export`,
+  `db-stats`, `collection-storage-size`, `aggregate-db`, `explain`,
   `switch-connection`, any `*-knowledge*` tool.
 
   **PII rule on user-data collections.**  Default to `count` or
@@ -296,9 +298,12 @@ Then:
 2. For a check tagged **SKIPPED / ERROR** — or if the whole file is
    **absent** (the pre-compute step failed) — run that check's own
    probes from `checks/NN-*.md` as documented.  Those steps are the
-   fallback path; the bundle is an optimization, never a dependency.
-   A wholly-absent bundle means you run every check exactly as you
-   would without pre-compute.
+   fallback path for every probe that needs no credential.
+   **Exception — secret-gated probes** (Check 9's
+   `/admin/cron-health`): the key is not in your environment, so you
+   cannot re-run them.  Report that check ⏳ **unavailable** with the
+   bundle's tag as the reason — never as clean, and never by trying
+   to reach the endpoint without its key.
 3. The bundle also carries **yesterday's QA issue** (`## YESTERDAY`) —
    use it for the self-feedback calibration below instead of a
    separate lookup (if `gh` isn't installed on your runner, that hunt

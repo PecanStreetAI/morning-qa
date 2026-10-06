@@ -24,8 +24,9 @@ to "Tier 1.5" or any higher tier, and the reasoning is the reusable part:
 - The workflow pre-approves exactly five read-only verbs (`count`, `find`,
   `aggregate`, `collection-schema`, `list-collections`) — and, because an
   allowlist alone pre-approves rather than restricts, the actual restriction
-  is that every write-shaped MCP tool is blocked by `--disallowed-tools` and
-  any write-capable server the project runs for other purposes is excluded
+  is server-side: `MDB_MCP_DISABLED_TOOLS` in the QA MCP config keeps the
+  server from registering any verb outside those five (write-shaped,
+  diagnostic and connection-switching alike), and any write-capable server the project runs for other purposes is excluded
   by the dedicated MCP config the QA run loads with `--strict-mcp-config`
   (`template/.mcp.qa.json`), which is separate
   from any interactive-session config.

@@ -48,6 +48,7 @@ from probes import (
     named_step,
     run_label_block,
     shell_lines,
+    spec_path,
     split_spec,
     step_names,
     unpinned_defect,
@@ -96,8 +97,16 @@ def test_two_job_split_and_its_guarantees():
         "point of the two-job split"
     )
     assert isinstance(pi.get("timeout-minutes"), int) and pi["timeout-minutes"] <= 15
-    assert wf["permissions"] == {"contents": "read", "issues": "write"}, (
-        "the workflow writes ONE thing (a daily issue); widening permissions "
+    assert wf["permissions"] == {"contents": "read"}, (
+        "the workflow-level token is read-only; the one write (the daily "
+        "issue) is granted to post-issue alone"
+    )
+    assert rq.get("permissions") == {"contents": "read", "issues": "read"}, (
+        "run-qa runs the agent, whose Bash inherits GH_TOKEN — its token must "
+        "stay read-only so a prompt injection cannot write to the repo"
+    )
+    assert pi.get("permissions") == {"contents": "read", "issues": "write"}, (
+        "post-issue writes ONE thing (a daily issue); widening permissions "
         "is a posture change, not a tweak"
     )
     assert wf["concurrency"] == {"group": "morning-qa", "cancel-in-progress": False}
@@ -174,7 +183,9 @@ def test_invocation_disallows_mutating_file_tools_and_stays_strict():
     cfg = json.loads(MCP_CONFIG.read_text(encoding="utf-8"))
     servers = cfg["mcpServers"]
     assert set(servers) == {"mongo-ro"}, "only read-only servers belong in .mcp.qa.json"
-    assert servers["mongo-ro"]["env"] == {"MDB_MCP_READ_ONLY": "true"}
+    env = servers["mongo-ro"]["env"]
+    assert set(env) == {"MDB_MCP_READ_ONLY", "MDB_MCP_DISABLED_TOOLS"}
+    assert env["MDB_MCP_READ_ONLY"] == "true"
     assert servers["mongo-ro"]["command"] == "mongodb-mcp-server", (
         "the command must be the pre-installed binary, not an npx cold-fetch "
         "(npx's fetch+install+spawn exceeds the CLI's MCP handshake timeout)"
@@ -212,6 +223,99 @@ def test_allowed_tools_is_the_five_readonly_mongo_verbs_and_skill_agrees():
         assert f"mcp__mongo-ro__{banned}" not in allowed, (
             f"{banned} is banned by SKILL.md but pre-approved by the workflow"
         )
+
+
+
+# Every tool mongodb-mcp-server@1.14.0 registers under MDB_MCP_READ_ONLY=true
+# (from a live `tools/list` with nothing disabled).  Update on a version bump:
+# a NEW verb is enabled by default, so it must be classified here — and the
+# disabled list extended — or this inventory goes stale silently.
+_MONGO_MCP_READONLY_INVENTORY = {
+    "aggregate", "aggregate-db", "collection-indexes", "collection-schema",
+    "collection-storage-size", "connect", "count", "db-stats", "explain",
+    "export", "find", "list-collections", "list-databases",
+    "list-knowledge-sources", "mongodb-logs", "search-knowledge",
+}
+_MONGO_MCP_KEEP = {"count", "find", "aggregate", "collection-schema", "list-collections"}
+# The tags (category / operation type) the server matches disabledTools on.
+_MONGO_MCP_TAGS = {
+    "list-knowledge-sources": {"assistant"}, "search-knowledge": {"assistant"},
+    "connect": {"connect"}, "aggregate-db": {"read"}, "export": {"read"},
+    "collection-indexes": {"metadata"}, "collection-storage-size": {"metadata"},
+    "db-stats": {"metadata"}, "explain": {"metadata"}, "list-databases": {"metadata"},
+    "mongodb-logs": {"metadata"},
+}
+
+
+def test_mongo_mcp_server_registers_only_the_five_readonly_verbs():
+    """`--allowed-tools` pre-approves; it does not restrict.  The restriction
+    is MDB_MCP_DISABLED_TOOLS in .mcp.qa.json, which keeps the server from
+    registering any verb outside the five the skill uses (verified live
+    against the pinned version: 16 tools → exactly these 5).  Pins that every
+    other verb of the pinned version is disabled by name, category or
+    operation type, that the five survive, and that write operation types
+    are off too (which also makes the server refuse $out/$merge stages)."""
+    cfg = json.loads(MCP_CONFIG.read_text(encoding="utf-8"))
+    raw = cfg["mcpServers"]["mongo-ro"]["env"]["MDB_MCP_DISABLED_TOOLS"]
+    disabled = {t.strip() for t in raw.split(",") if t.strip()}
+    for verb in _MONGO_MCP_READONLY_INVENTORY - _MONGO_MCP_KEEP:
+        tags = {verb} | _MONGO_MCP_TAGS.get(verb, set())
+        assert tags & disabled, f"mongo MCP verb {verb!r} is still registered"
+    for verb in _MONGO_MCP_KEEP:
+        assert verb not in disabled, f"{verb} is a verb the skill needs"
+    assert not disabled & {"read", "mongodb"}, (
+        "disabling the `read` type or `mongodb` category removes the five "
+        "verbs the cross-check gate needs"
+    )
+    for op in ("create", "update", "delete", "atlas", "atlas-local", "assistant"):
+        assert op in disabled, f"{op} must be disabled for the Tier-1 MCP"
+    run_text = "\n".join(step["run"] for _, step in all_run_steps(load_workflow()))
+    m = re.search(r"mongodb-mcp-server@(\S+)", run_text)
+    assert m and m.group(1) == "1.14.0", (
+        "mongodb-mcp-server pin changed — re-run `tools/list` against the new "
+        "version and update _MONGO_MCP_READONLY_INVENTORY before bumping this"
+    )
+
+
+# The agent step's env is an ALLOWLIST.  The agent runs unrestricted Bash over
+# third-party text, and Bash inherits this env — so anything listed here is
+# reachable by a prompt injection.  Probe credentials live on the pre-compute
+# step only.  Adding a name here is a posture change: justify it in the
+# workflow comment and docs/precompute.md, not just this set.
+_AGENT_ENV_ALLOWED = {
+    "ANTHROPIC_API_KEY",            # runs the model
+    "APP_BASE_URL",                 # a repo variable, not a secret
+    "MDB_MCP_CONNECTION_STRING",    # read-only DB user, for the MCP server
+    "GH_TOKEN",                     # issues: read (run-qa job permissions)
+}
+
+
+def test_agent_env_holds_no_probe_credentials():
+    agent_env = set(named_step(_run_qa(), "Run morning QA skill").get("env") or {})
+    assert agent_env == _AGENT_ENV_ALLOWED, (
+        f"agent env drifted: added={sorted(agent_env - _AGENT_ENV_ALLOWED)} "
+        f"removed={sorted(_AGENT_ENV_ALLOWED - agent_env)}.  A secret-gated "
+        "probe belongs in qa_precompute.py, not the agent's env"
+    )
+    for name in ("API_ACCESS_KEY", "ADMIN_API_KEY", "SENTRY_AUTH_TOKEN"):
+        assert name not in agent_env
+    # No job-level env either, which would reach the agent step by inheritance.
+    assert not _run_qa().get("env"), "run-qa must not carry a job-level env"
+    assert not load_workflow().get("env"), "the workflow must not carry a top-level env"
+
+
+def test_skill_and_check_9_do_not_send_the_agent_after_missing_keys():
+    """With the keys gone from the agent's env, a doc telling the agent to
+    send `X-Admin-Key: $ADMIN_API_KEY` would make it probe unauthenticated
+    and misread the 403.  The secret-gated fallback is ⏳ unavailable."""
+    skill = flat(SKILL.read_text(encoding="utf-8"))
+    spec9 = flat(spec_path(9).read_text(encoding="utf-8"))
+    for doc, label in ((skill, "SKILL.md"), (spec9, "checks/09")):
+        assert "-H \"X-Api-Key: $API_ACCESS_KEY\"" not in doc, label
+        assert "pre-compute" in doc.lower(), label
+    assert "Exception — secret-gated probes" in skill
+    assert "issues: read" in skill
+    assert "ADMIN_API_KEY` is deliberately NOT in the agent's environment" in spec9
 
 
 # ── Supply-chain: every global npm install is exact-pinned ───────────────────

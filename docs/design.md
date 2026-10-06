@@ -102,8 +102,9 @@ exact npm version instead of a bare name or `@latest`.
 Why it matters more here than on a normal CI job: these installs run
 **unattended, daily, immediately before** the step whose environment carries
 `ANTHROPIC_API_KEY`, `MDB_MCP_CONNECTION_STRING` (a read-only URI which, in a
-real deployment, points at a cluster holding live user data),
-`API_ACCESS_KEY`, `ADMIN_API_KEY`, and the GitHub token. Resolved at
+real deployment, points at a cluster holding live user data), and the GitHub
+token — with the pre-compute step's `API_ACCESS_KEY` and `ADMIN_API_KEY` in the
+same job. Resolved at
 `latest`, a compromised or account-takeover release executes in that
 environment within 24 hours with no repo change to review. It is the same
 silent-upgrade class as the unpinned-model drift in § Cost — that one cost
