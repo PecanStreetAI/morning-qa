@@ -1,0 +1,84 @@
+# Sandbox canary — proves the QA agent's Bash sandbox actually contains it.
+#
+# Manual only (Actions → "Sandbox canary" → Run workflow).  Runs the SAME
+# pinned Claude Code CLI, runner preparation and sandbox settings as
+# template/.github/workflows/morning-qa.yml, has the agent run
+# template/.github/scripts/qa_sandbox_probes.sh inside the sandbox, then
+# judges the log with qa_sandbox_canary.py.  Green means: unlisted hosts are
+# refused, the allowlisted registry works, the secrets are absent from the
+# agent's commands and from every process they can see, /tmp is writable,
+# settings paths are not, and WebFetch/WebSearch are not offered.
+#
+# Needs ONE repository secret: ANTHROPIC_API_KEY.  The other "secrets" below
+# are dummy values that exist only so the probes can check they are hidden.
+# Cost: one short Sonnet session, typically a few cents.
+#
+# Re-run it after any change to the CLI pin, the sandbox settings, or the
+# runner image — tests/test_sandbox.py keeps its pins in lockstep with
+# morning-qa.yml, but only a live run proves the sandbox starts.
+
+name: Sandbox canary
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sandbox-canary
+  cancel-in-progress: false
+
+jobs:
+  canary:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v5
+
+      - name: Require the API key secret
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          if [ -z "${ANTHROPIC_API_KEY}" ]; then
+            echo "::error::Add a repository secret named ANTHROPIC_API_KEY (Settings → Secrets and variables → Actions), then re-run."
+            exit 1
+          fi
+
+      - name: Prepare runner for the sandbox
+        run: bash template/.github/scripts/qa_sandbox_prepare.sh "$GITHUB_WORKSPACE"
+
+      - name: Install Claude Code CLI (same exact pin as morning-qa.yml)
+        run: npm install -g @anthropic-ai/claude-code@2.1.241
+
+      - name: Run the probes inside the agent's sandbox
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          MDB_MCP_CONNECTION_STRING: canary-dummy-not-a-secret
+          GH_TOKEN: canary-dummy-not-a-secret
+          APP_BASE_URL: https://example.com
+        run: |
+          set -o pipefail
+          SETTINGS="$(python3 template/.github/scripts/qa_sandbox_settings.py)"
+          claude -p "Run exactly one Bash command and nothing else: bash template/.github/scripts/qa_sandbox_probes.sh — then reply with its output verbatim. Do not run any other command, retry, or use any other tool." \
+            --model claude-sonnet-5 \
+            --output-format stream-json --verbose \
+            --permission-mode dontAsk \
+            --strict-mcp-config \
+            --settings "$SETTINGS" \
+            --allowed-tools 'Bash' \
+            --disallowed-tools 'Write,Edit,NotebookEdit,WebFetch,WebSearch' \
+            --max-turns 6 \
+            2>&1 | tee /tmp/canary.log \
+            || echo "claude exited non-zero — the judge below decides"
+
+      - name: Judge the canary
+        run: python3 template/.github/scripts/qa_sandbox_canary.py /tmp/canary.log
+
+      - name: Upload the canary log
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: sandbox-canary-${{ github.run_id }}
+          path: /tmp/canary.log
+          retention-days: 14

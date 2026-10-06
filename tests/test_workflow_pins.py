@@ -168,7 +168,9 @@ def test_invocation_disallows_mutating_file_tools_and_stays_strict():
     # masked by "NotebookEdit", so a value of 'Write,NotebookEdit' (Edit
     # dropped) would falsely pass.
     tokens = {t.strip() for t in m.group(1).split(",")}
-    for tool in ("Write", "Edit", "NotebookEdit"):
+    # WebFetch/WebSearch run inside the CLI process, outside the Bash
+    # sandbox's network rules — leaving them would reopen arbitrary egress.
+    for tool in ("Write", "Edit", "NotebookEdit", "WebFetch", "WebSearch"):
         assert tool in tokens, f"--disallowed-tools no longer removes {tool} (tokens={tokens})"
     assert "ToolSearch" not in tokens, (
         "ToolSearch must stay available — it loads the deferred read-only MCP verbs"
@@ -213,8 +215,10 @@ def test_allowed_tools_is_the_five_readonly_mongo_verbs_and_skill_agrees():
     }, f"allow-listed MCP surface changed: {sorted(mcp)}"
 
     skill = SKILL.read_text(encoding="utf-8")
-    for tool in ("Read", "Bash", "WebFetch"):
+    for tool in ("Read", "Bash"):
         assert tool in allowed, f"SKILL.md promises {tool}; the workflow no longer lists it"
+    for tool in ("WebFetch", "WebSearch"):
+        assert tool not in allowed, f"{tool} is outside the sandbox; it must not be pre-approved"
     for verb in mcp:
         assert verb in skill, f"SKILL.md no longer documents allow-listed verb {verb}"
     # SKILL.md's do-not-call list stays out of the pre-approved surface.
@@ -286,8 +290,10 @@ _AGENT_ENV_ALLOWED = {
     "ANTHROPIC_API_KEY",            # runs the model
     "APP_BASE_URL",                 # a repo variable, not a secret
     "MDB_MCP_CONNECTION_STRING",    # read-only DB user, for the MCP server
-    "GH_TOKEN",                     # issues: read (run-qa job permissions)
 }
+# (No GH_TOKEN: yesterday's issue reaches the agent through the pre-compute
+# bundle.  Every secret above is also unset inside the agent's Bash sandbox —
+# tests/test_sandbox.py pins that.)
 
 
 def test_agent_env_holds_no_probe_credentials():
@@ -314,7 +320,7 @@ def test_skill_and_check_9_do_not_send_the_agent_after_missing_keys():
         assert "-H \"X-Api-Key: $API_ACCESS_KEY\"" not in doc, label
         assert "pre-compute" in doc.lower(), label
     assert "Exception — secret-gated probes" in skill
-    assert "issues: read" in skill
+    assert "you hold no GitHub token" in skill
     assert "ADMIN_API_KEY` is deliberately NOT in the agent's environment" in spec9
 
 

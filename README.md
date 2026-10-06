@@ -59,9 +59,11 @@ ran anyway), so what actually makes Tier 1 read-only is the
 read-only MCP config loads, and that config disables every Mongo verb outside
 the five the skill needs), with the skill's hard constraints layered on
 top. Because the agent still has `Bash`, containment also rests on what it
-*holds*: the job that runs it gets an `issues: read` token, and probe
-credentials stay in the deterministic pre-compute step rather than the
-agent's environment. A tier change is a change to those flags, recorded in
+can *reach*. Probe credentials stay in the deterministic pre-compute step.
+Every Bash command runs in Claude Code's sandbox, which hides the secrets the
+CLI and MCP server need and refuses network access outside a short allowlist.
+`WebFetch` and `WebSearch`, which the sandbox cannot cover, are removed. The
+repo's manual **Sandbox canary** workflow proves this on a live runner. A tier change is a change to those flags, recorded in
 [docs/promotion_criteria.md](docs/promotion_criteria.md) — the only place a
 tier change is valid. Promotion runs through quantitative
 gates (≥14 consecutive days with no false-positive Critical, ≥3
@@ -212,7 +214,8 @@ template/                     ← what YOU copy into your repo root
                                 TEMPLATE.md), LESSONS.md
   .github/workflows/          ← morning-qa.yml, qa-ledger-retro.yml
   .github/scripts/            ← qa_precompute.py, qa_severity_label.sh,
-                                qa_run_telemetry.js, qa_ledger_retro.py
+                                qa_run_telemetry.js, qa_ledger_retro.py,
+                                qa_sandbox_*.{py,sh} (the agent's sandbox)
   .mcp.qa.json                ← the QA run's own MCP config (read-only Mongo)
 docs/                         ← the design record: design, check catalog,
                                 precompute, promotion criteria, ledger,
@@ -245,7 +248,12 @@ only runs workflows found at a repo's own `.github/workflows/`. They run in
    (`backend/requirements.txt`, `frontend/` — worked examples for Check 7;
    point them at your manifests, or delete the halves you don't have, or
    run-qa dies before the agent ever starts and every day posts the
-   synthesized 🔴 "no artifact" issue).
+   synthesized 🔴 "no artifact" issue). If a check you add needs to reach
+   another host from the agent's Bash, add it to `BASE_ALLOWED_DOMAINS` in
+   `.github/scripts/qa_sandbox_settings.py`; the sandbox refuses everything
+   else. On a self-hosted runner, `qa_sandbox_prepare.sh` needs `sudo` (it
+   installs bubblewrap + socat and lifts Ubuntu 24.04's user-namespace
+   restriction; see its header for the long-lived-runner alternative).
 4. **Create your calibration ledger** at `docs/calibration_ledger.md` in
    *your* repo (copy this repo's as the format) or set `QA_LEDGER_PATH` in
    `qa-ledger-retro.yml` — the weekly retro's dedupe deliberately fail-opens

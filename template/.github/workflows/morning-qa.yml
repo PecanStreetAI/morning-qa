@@ -6,9 +6,10 @@ name: Morning QA
 # Tier 1 (Observer) — the agent reads, never writes.  Enforced
 # mechanically by --disallowed-tools + --strict-mcp-config below
 # (--allowed-tools only PRE-APPROVES — it does not restrict; see the
-# comment at the invocation step): Read + read-only Bash + WebFetch +
-# a handful of read-only Mongo MCP verbs pre-approved; Edit, Write,
-# and destructive git/gh commands blocked.
+# comment at the invocation step): Read + sandboxed Bash + a handful
+# of read-only Mongo MCP verbs pre-approved; Edit, Write, WebFetch and
+# WebSearch removed; every Bash call runs in Claude Code's sandbox
+# (no secrets, allowlisted egress only).
 #
 # Promotion to higher tiers requires editing docs/promotion_criteria.md
 # AND this workflow's --allowed-tools list, in lockstep.  Don't change
@@ -307,6 +308,15 @@ jobs:
           python3 .github/scripts/qa_precompute.py \
             || echo "pre-compute exited non-zero — agent self-gathers credential-free checks; secret-gated ones report unavailable (fail-soft)"
 
+      - name: Prepare runner for the agent sandbox
+        # Installs bubblewrap + socat and lifts Ubuntu 24.04's AppArmor
+        # block on unprivileged user namespaces, so Claude Code can sandbox
+        # every Bash command the agent runs (settings: qa_sandbox_settings.py,
+        # rationale in its docstring).  Fails hard on purpose: no sandbox,
+        # no agent.  The run-qa fallback still uploads a report, so the
+        # daily issue posts and says the run never started.
+        run: bash .github/scripts/qa_sandbox_prepare.sh "$GITHUB_WORKSPACE"
+
       - name: Run morning QA skill
         # ── Secret posture: the agent's env is an ALLOWLIST ──────────────
         # This step runs an LLM with unrestricted `Bash` over third-party
@@ -321,10 +331,14 @@ jobs:
         #     deterministic code.  Their probes reach the agent as bundle
         #     facts; when a secret-gated bundle block is not OK the check
         #     reports ⏳ unavailable instead of re-probing.
-        #   * What remains is what the agent cannot work without, each
-        #     scoped to the least it can be.  Adding a var here is a
-        #     posture change: tests/test_workflow_pins.py pins the exact
-        #     set.  A new secret-gated check belongs in qa_precompute.py.
+        #   * What remains is what the CLI and the MCP server cannot work
+        #     without.  The agent's commands do not see even those: every
+        #     Bash call runs in Claude Code's sandbox (--settings below),
+        #     which unsets them for sandboxed commands and refuses network
+        #     egress outside a short allowlist.  Adding a var here is a
+        #     posture change: tests pin the exact set, and every secret in
+        #     it must be on qa_sandbox_settings.py's deny list.  A new
+        #     secret-gated check belongs in qa_precompute.py.
         env:
           # Required to run the model at all.
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
@@ -346,12 +360,10 @@ jobs:
           # roles are the control that also binds Bash.  Never `echo`,
           # `env`, or `printenv` this value from any `run:` block.
           MDB_MCP_CONNECTION_STRING: ${{ secrets.MDB_MCP_CONNECTION_STRING }}
-          # Cross-day diff queries (`gh issue view <yesterday's issue>`)
-          # from inside the skill — without it the agent reported "no
-          # prior baseline" for every check's delta.  This job's token is
-          # `issues: read` (see run-qa's permissions block), so it can read
-          # yesterday's issue and cannot write anything.
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # No GH_TOKEN: yesterday's issue + its operator comments reach the
+          # agent through the pre-compute bundle's `## YESTERDAY` section,
+          # and the sandbox would deny the token to `gh` anyway.  When that
+          # section is absent the skill reports "no prior baseline" (Info).
         run: |
           # Claude Code CLI invocation — the flags below each encode a
           # lesson; change them only with the history in mind.
@@ -447,17 +459,33 @@ jobs:
           # code, not tee's (tee almost always exits 0).  The real
           # report-presence gate is the `if [ ! -s /tmp/qa-report.md ]`
           # block below; this echo is just an informational breadcrumb.
+          #   * `--settings` (inline JSON, never a file the agent's Bash
+          #     could rewrite) turns on the Bash sandbox; see
+          #     .github/scripts/qa_sandbox_settings.py.  WebFetch and
+          #     WebSearch run inside the CLI process, outside the
+          #     sandbox's network rules, so they are disallowed: HTTP
+          #     probes use `curl` in the sandbox instead.  Prove the
+          #     sandbox on a new CLI pin or runner image with the
+          #     framework repo's "Sandbox canary" workflow.
           set -o pipefail
-          claude -p "/morning-qa" \
-            --model claude-sonnet-5 \
-            --output-format stream-json --verbose \
-            --permission-mode dontAsk \
-            --mcp-config .mcp.qa.json \
-            --strict-mcp-config \
-            --allowed-tools 'Read,Bash,WebFetch,mcp__mongo-ro__count,mcp__mongo-ro__find,mcp__mongo-ro__aggregate,mcp__mongo-ro__collection-schema,mcp__mongo-ro__list-collections' \
-            --disallowed-tools 'Write,Edit,NotebookEdit' \
-            2>&1 | tee /tmp/claude-stdout.log \
-            || echo "Claude run exited non-zero — continuing to post whatever report it produced."
+          # A settings failure (e.g. a malformed APP_BASE_URL) must not
+          # start the agent unsandboxed — and must not skip the
+          # report-missing fallback below, so no `exit` here.
+          if SANDBOX_SETTINGS="$(python3 .github/scripts/qa_sandbox_settings.py)"; then
+            claude -p "/morning-qa" \
+              --model claude-sonnet-5 \
+              --output-format stream-json --verbose \
+              --permission-mode dontAsk \
+              --mcp-config .mcp.qa.json \
+              --strict-mcp-config \
+              --settings "$SANDBOX_SETTINGS" \
+              --allowed-tools 'Read,Bash,mcp__mongo-ro__count,mcp__mongo-ro__find,mcp__mongo-ro__aggregate,mcp__mongo-ro__collection-schema,mcp__mongo-ro__list-collections' \
+              --disallowed-tools 'Write,Edit,NotebookEdit,WebFetch,WebSearch' \
+              2>&1 | tee /tmp/claude-stdout.log \
+              || echo "Claude run exited non-zero — continuing to post whatever report it produced."
+          else
+            echo "::error::could not build sandbox settings (bad APP_BASE_URL?) — agent not started"
+          fi
 
           # The skill writes /tmp/qa-report.md INCREMENTALLY — a valid,
           # self-contained report is on disk after every check (SKILL.md
