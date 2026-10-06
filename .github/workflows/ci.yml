@@ -4,14 +4,17 @@
 #
 # Two jobs, both required:
 #   * tests    — the doc↔code lockstep pins under tests/ (the same
-#                discipline the framework preaches, applied to itself).
+#                discipline the framework preaches, applied to itself),
+#                then ShellCheck over every tracked *.sh.
 #   * denylist — scripts/denylist_scan.sh + a secret scan. This repo is
 #                a sanitized extraction from a private production system;
 #                the scan keeps a raw private-side paste from ever
 #                landing here (see PORTING.md).
 #
 # All actions and tools are pinned by SHA / exact version — the same
-# unattended-install reasoning documented in docs/design.md.
+# unattended-install reasoning documented in docs/design.md.  Python-side
+# tools come from requirements-dev.txt (one file, so local runs and CI
+# install the same thing, and Dependabot can see the pins).
 
 name: CI
 
@@ -31,10 +34,16 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: '3.12'
-      - name: Install test deps (pinned)
-        run: pip install pytest==8.3.4 pyyaml==6.0.2
+      - name: Install dev deps (pinned)
+        run: pip install -r requirements-dev.txt
       - name: Run lockstep pins
         run: python -m pytest tests/ -v
+      - name: ShellCheck every tracked shell script
+        # The repo's correctness rests on its shell scripts (the severity
+        # classifier shipped three silent bugs as untestable inline bash).
+        # `git ls-files` keeps this exhaustive: a new *.sh is linted the
+        # day it lands, with no list to update.
+        run: git ls-files -z '*.sh' | xargs -0 --no-run-if-empty shellcheck
 
   denylist:
     runs-on: ubuntu-latest
@@ -47,7 +56,7 @@ jobs:
         run: bash scripts/denylist_scan.sh
       - name: Secret scan (detect-secrets, pinned)
         run: |
-          pip install detect-secrets==1.5.0
+          pip install -r requirements-dev.txt
           # --all-files: no baseline exists on purpose — this tree must
           # contain zero secrets, so any hit is a failure, not drift.
           # .git/ is excluded: FETCH_HEAD's commit SHA reads as a

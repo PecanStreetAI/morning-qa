@@ -46,6 +46,7 @@ WORKFLOW = TEMPLATE / ".github/workflows/morning-qa.yml"
 RETRO_WORKFLOW = TEMPLATE / ".github/workflows/qa-ledger-retro.yml"
 CI_WORKFLOW = REPO / ".github/workflows/ci.yml"
 DEPENDABOT_CONFIG = REPO / ".github/dependabot.yml"
+REQUIREMENTS_DEV = REPO / "requirements-dev.txt"
 # Every workflow file whose `uses:` pins Dependabot maintains.
 ALL_WORKFLOWS = (CI_WORKFLOW, WORKFLOW, RETRO_WORKFLOW)
 SEV_SCRIPT = TEMPLATE / ".github/scripts/qa_severity_label.sh"
