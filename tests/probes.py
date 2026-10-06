@@ -58,6 +58,7 @@ SANDBOX_SETTINGS_SCRIPT = TEMPLATE / ".github/scripts/qa_sandbox_settings.py"
 SANDBOX_PREPARE_SCRIPT = TEMPLATE / ".github/scripts/qa_sandbox_prepare.sh"
 SANDBOX_PROBES_SCRIPT = TEMPLATE / ".github/scripts/qa_sandbox_probes.sh"
 SANDBOX_CANARY_SCRIPT = TEMPLATE / ".github/scripts/qa_sandbox_canary.py"
+COLLECT_REPORT_SCRIPT = TEMPLATE / ".github/scripts/qa_collect_report.py"
 MCP_CONFIG = TEMPLATE / ".mcp.qa.json"
 
 SKILL = TEMPLATE / ".claude/skills/morning-qa/SKILL.md"

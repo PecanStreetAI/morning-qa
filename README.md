@@ -61,7 +61,9 @@ the five the skill needs), with the skill's hard constraints layered on
 top. Because the agent still has `Bash`, containment also rests on what it
 can *reach*. Probe credentials stay in the deterministic pre-compute step.
 Every Bash command runs in Claude Code's sandbox, which hides the secrets the
-CLI and MCP server need and refuses network access outside a short allowlist.
+CLI and MCP server need, refuses network access to anything but your app, and
+lets the agent's commands write only `/tmp/qa-agent` — not the checkout, not
+the rest of `/tmp`.
 `WebFetch` and `WebSearch`, which the sandbox cannot cover, are removed. The
 repo's manual **Sandbox canary** workflow proves this on a live runner. A tier change is a change to those flags, recorded in
 [docs/promotion_criteria.md](docs/promotion_criteria.md) — the only place a
@@ -215,7 +217,8 @@ template/                     ← what YOU copy into your repo root
   .github/workflows/          ← morning-qa.yml, qa-ledger-retro.yml
   .github/scripts/            ← qa_precompute.py, qa_severity_label.sh,
                                 qa_run_telemetry.js, qa_ledger_retro.py,
-                                qa_sandbox_*.{py,sh} (the agent's sandbox)
+                                qa_sandbox_*.{py,sh} (the agent's sandbox),
+                                qa_collect_report.py (report out of it)
   .mcp.qa.json                ← the QA run's own MCP config (read-only Mongo)
 docs/                         ← the design record: design, check catalog,
                                 precompute, promotion criteria, ledger,
@@ -248,10 +251,17 @@ only runs workflows found at a repo's own `.github/workflows/`. They run in
    (`backend/requirements.txt`, `frontend/` — worked examples for Check 7;
    point them at your manifests, or delete the halves you don't have, or
    run-qa dies before the agent ever starts and every day posts the
-   synthesized 🔴 "no artifact" issue). If a check you add needs to reach
-   another host from the agent's Bash, add it to `BASE_ALLOWED_DOMAINS` in
-   `.github/scripts/qa_sandbox_settings.py`; the sandbox refuses everything
-   else. On a self-hosted runner, `qa_sandbox_prepare.sh` needs `sudo` (it
+   synthesized 🔴 "no report" issue). The agent's Bash reaches only your
+   app's host. If a check you add needs another host, first try moving the
+   probe into `qa_precompute.py`, where no model is in the loop; add a host to
+   `BASE_ALLOWED_DOMAINS` in `.github/scripts/qa_sandbox_settings.py` only if
+   it cannot store data. Anything that accepts uploads (package registries,
+   paste sites, git hosts) gives an injected command a way to publish what
+   the agent reads; that is why npm and PyPI are not on the list. The agent's
+   commands can write only `/tmp/qa-agent`: a check that needs a scratch file
+   writes it there, and tool caches (npm, pip, pytest) are already pointed
+   there. Re-run the **Sandbox canary** (Actions tab) after changing either
+   list. On a self-hosted runner, `qa_sandbox_prepare.sh` needs `sudo` (it
    installs bubblewrap + socat and lifts Ubuntu 24.04's user-namespace
    restriction; see its header for the long-lived-runner alternative).
 4. **Create your calibration ledger** at `docs/calibration_ledger.md` in

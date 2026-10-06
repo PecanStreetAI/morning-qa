@@ -31,10 +31,22 @@ booleans. The step is the ONLY holder of the probe credentials
 (`API_ACCESS_KEY`, `ADMIN_API_KEY`, `SENTRY_*`); the agent step does not get
 them. The agent runs unrestricted `Bash` over third-party text, so anything in
 its env is reachable by a prompt injection — keeping probe keys in deterministic
-code is the containment. Consequence: a credential-free check whose block is
-`SKIPPED`/`ERROR` falls back to the agent's own probes, but a secret-gated one
-(Check 9) is reported ⏳ unavailable. A new secret-gated check belongs in
-`qa_precompute.py`, not in the agent's env.
+code is the containment. Consequence: a check whose block is `SKIPPED`/`ERROR`
+falls back to the agent's own probes only when they need neither a credential
+nor a host the agent's sandbox refuses. Two shipped probe sets are
+**pre-compute only** and are reported ⏳ unavailable instead:
+
+- Check 9's secret-gated cron-health probe (its key is not in the agent's env);
+- Check 7's registry work — `pip list --outdated`, `pip-audit`, `npm outdated`,
+  `npm audit`, the CI-toolchain dist-tag and advisory lookups. Since 2026-10
+  the agent's sandbox no longer reaches `registry.npmjs.org` or `pypi.org`:
+  both accept uploads (`npm publish` is a PUT), so with them on the allowlist
+  an injected command could publish anything the agent reads — Mongo rows from
+  the MCP included. The pre-compute step reaches them with no model in the
+  loop.
+
+A new secret-gated check, or one that needs a host that accepts uploads,
+belongs in `qa_precompute.py`, not in the agent's env or its allowlist.
 
 **Stays with the agent** (judgment / MCP-gated, never in the bundle):
 
@@ -134,7 +146,9 @@ cost or eat the agent's budget. Four layers:
    and a second belt.
 4. The agent's contract: use a check's `OK` block, else run that check's own
    probes from its `checks/NN-*.md` spec. **A wholly-absent bundle ⇒ the
-   agent runs every check exactly as it did before precompute existed.**
+   agent runs every check it still can** — Check 0 in full, Check 7's local
+   steps — and reports the pre-compute-only parts (Check 7's registry probes,
+   Check 9's cron-health) ⏳ unavailable.
 
 A `Clean stale workspace artifacts` step removes `/tmp/qa-precompute` before
 each run, because a self-hosted runner's `/tmp` persists between runs —
@@ -303,7 +317,10 @@ The script's probes must stay faithful to the check specs. Guards:
 - A mirror test fails if this doc or the skill's "Pre-computed inputs"
   section drifts from the script's set.
 - Each pre-computed `checks/NN-*.md` spec carries a banner pointing here; its
-  probe steps ARE the fallback path, so they must stay runnable and correct.
+  probe steps ARE the fallback path, so they must stay runnable and correct —
+  except the ones the banner marks pre-compute only (Check 7's registry
+  probes, Check 9's cron-health). Those stay as the record of what the script
+  runs; do not make them "runnable" by widening the agent's allowlist.
 
 ## Adding / removing a pre-computed check
 
@@ -351,4 +368,4 @@ framing — a deliberate, separately-reviewed decision, not a drop-in.
   for post-hoc inspection.
 - Findings for unchanged conditions should match the prior day's (no fidelity
   loss from extraction). If a pre-computed fact ever looks wrong, the agent
-  reads the linked `raw/` response or re-probes.
+  reads the linked `raw/` response, or re-probes where its sandbox allows.

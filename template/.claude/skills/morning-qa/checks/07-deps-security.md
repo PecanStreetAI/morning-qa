@@ -1,6 +1,6 @@
 # Check 7 — Dependency + security
 
-_Last reviewed: 2026-08-27_
+_Last reviewed: 2026-10-06_
 
 > **Pre-computed:** the raw probe outputs (pip/npm outdated + pip-audit + npm
 > audit + the CI-toolchain-pin freshness/advisory facts, Step 6) are normally
@@ -8,8 +8,17 @@ _Last reviewed: 2026-08-27_
 > (see SKILL.md § "Pre-computed inputs").  When this check's block is `OK`, use
 > those facts — but the **Accepted-CVE allowlist suppression + each row's
 > re-verify greps (Step 4) stay YOURS**; that is a security decision, deliberately
-> NOT pre-computed.  The probe steps below are the FALLBACK for a
-> `SKIPPED`/`ERROR`/absent block.
+> NOT pre-computed.
+>
+> **Pre-compute ONLY for the registry probes (Steps 1, 2, 6).**  They need
+> `registry.npmjs.org` / `pypi.org`, which the agent's sandbox refuses: both
+> accept uploads (`npm publish` is a PUT), so reaching them would give an
+> injected command a way off-box for anything the agent reads.  When this
+> check's block is `SKIPPED`/`ERROR`/absent, do NOT run those commands — report
+> the backend, frontend and CI-toolchain halves ⏳ **unavailable** (🟡 Warning,
+> per Edge cases), never clean.  The commands are kept below as the record of
+> what the pre-compute step runs.  Steps 3–5 (and Step 4's local re-verify
+> greps) are yours either way.
 
 ## Why this check exists
 
@@ -23,7 +32,7 @@ entirely, which is how a NEW advisory gets missed.
 
 ## Steps
 
-1. **Backend deps:**
+1. **Backend deps** (pre-compute runs these):
    ```bash
    pip list --outdated --format=json 2>/dev/null | head -200
    pip-audit --strict --format=json 2>&1 || true
@@ -31,7 +40,7 @@ entirely, which is how a NEW advisory gets missed.
    (If `pip-audit` isn't installed on the runner, skip with a
    Warning — don't fail the run.)
 
-2. **Frontend deps:**
+2. **Frontend deps** (pre-compute runs these):
    ```bash
    cd frontend && npm outdated --json 2>/dev/null || true
    cd frontend && npm audit --audit-level=high --json 2>/dev/null || true
@@ -82,9 +91,11 @@ entirely, which is how a NEW advisory gets missed.
    (Tier-1 observer; the operator bumps deliberately after reading release
    notes).
 
-   **Fallback probe** (only when the bundle block is `SKIPPED`/`ERROR`/absent) —
-   read the two pinned versions from the `npm install -g` lines in
-   `.github/workflows/morning-qa.yml`, then for each `<pkg>`/`<pinned>`:
+   **What pre-compute runs** (reference only — the agent's sandbox refuses the
+   registry, so a `SKIPPED`/`ERROR`/absent block means both tools' facts are
+   ⏳ unavailable → 🟡 Warning) — it reads the two pinned versions from the
+   `npm install -g` lines in `.github/workflows/morning-qa.yml`, then for each
+   `<pkg>`/`<pinned>`:
    ```bash
    # staleness: pinned vs the latest/stable dist-tags (URL-encode the scoped @)
    enc=$(printf '%s' "<pkg>" | sed 's|/|%2F|g')
@@ -94,8 +105,7 @@ entirely, which is how a NEW advisory gets missed.
      --data '{"<pkgA>":["<pinnedA>"],"<pkgB>":["<pinnedB>"]}' \
      https://registry.npmjs.org/-/npm/v1/security/advisories/bulk
    ```
-   The lightweight dist-tags endpoint gives `latest`/`stable` but not publish
-   times, so in the fallback judge staleness from the version gap.  An empty `{}`
+   An empty `{}`
    from the advisories endpoint = no CVE; a non-2xx / non-JSON body = **treat as
    unavailable → Warning** (per Edge cases), never a clean bill.
 

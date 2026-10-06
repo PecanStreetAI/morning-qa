@@ -103,13 +103,26 @@ jobs:
         # today's pre-compute crashes before rewriting it, the agent must
         # not read yesterday's bundle as today's.  rm -rf handles both
         # the files and the dir.
-        run: rm -rf /tmp/qa-report.md /tmp/claude-stdout.log /tmp/qa-precompute
+        #
+        # /tmp/qa-agent (the agent's only writable dir, where the skill
+        # builds its report) too: the "Collect the agent's report" step
+        # runs even when the sandbox never started, and must not find
+        # yesterday's report there.  qa_sandbox_prepare.sh re-creates it.
+        run: rm -rf /tmp/qa-report.md /tmp/claude-stdout.log /tmp/qa-precompute /tmp/qa-agent
 
       - name: Checkout repo
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v5
         # Default depth is fine for the starter roster.  If you add a
         # check that scans recent git history (e.g. a daily diff review),
         # set fetch-depth deep enough to cover its window.
+        #
+        # persist-credentials: false — otherwise checkout leaves the job's
+        # GITHUB_TOKEN in .git/config, where the agent's Read tool and
+        # Bash can read it.  Nothing in this job pushes or fetches: the
+        # pre-compute step's git calls are local reads and its GitHub API
+        # calls take GH_TOKEN from its own env.
+        with:
+          persist-credentials: false
 
       - name: Setup Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
@@ -312,9 +325,11 @@ jobs:
         # Installs bubblewrap + socat and lifts Ubuntu 24.04's AppArmor
         # block on unprivileged user namespaces, so Claude Code can sandbox
         # every Bash command the agent runs (settings: qa_sandbox_settings.py,
-        # rationale in its docstring).  Fails hard on purpose: no sandbox,
-        # no agent.  The run-qa fallback still uploads a report, so the
-        # daily issue posts and says the run never started.
+        # rationale in its docstring), and re-creates /tmp/qa-agent, the
+        # one directory the agent's commands may write.  Fails hard on
+        # purpose: no sandbox, no agent.  The daily issue still posts:
+        # with no report, post-issue's missing-artifact fallback says the
+        # run never produced one.
         run: bash .github/scripts/qa_sandbox_prepare.sh "$GITHUB_WORKSPACE"
 
       - name: Run morning QA skill
@@ -476,12 +491,18 @@ jobs:
           #     ToolSearch only loads the deferred mongo-ro schemas; Skill
           #     only loads skill instructions.  Neither executes anything.
           #     MCP tools are not built-ins and are unaffected.
+          #   * CLAUDE_CODE_TMPDIR puts the CLI's temp files in the agent's
+          #     writable dir; its default (/tmp/claude) is denied to the
+          #     agent's commands.  The skill writes its report to
+          #     /tmp/qa-agent/qa-report.md; qa_collect_report.py copies it
+          #     to /tmp/qa-report.md (refusing links and non-files) for the
+          #     unsandboxed steps below, which never read the agent's dir.
           set -o pipefail
           # A settings failure (e.g. a malformed APP_BASE_URL) must not
           # start the agent unsandboxed — and must not skip the
           # report-missing fallback below, so no `exit` here.
           if SANDBOX_SETTINGS="$(python3 .github/scripts/qa_sandbox_settings.py)"; then
-            claude -p "/morning-qa" \
+            CLAUDE_CODE_TMPDIR=/tmp/qa-agent/tmp claude -p "/morning-qa" \
               --model claude-sonnet-5 \
               --output-format stream-json --verbose \
               --permission-mode dontAsk \
@@ -496,8 +517,9 @@ jobs:
           else
             echo "::error::could not build sandbox settings (bad APP_BASE_URL?) — agent not started"
           fi
+          python3 .github/scripts/qa_collect_report.py
 
-          # The skill writes /tmp/qa-report.md INCREMENTALLY — a valid,
+          # The skill writes its report INCREMENTALLY — a valid,
           # self-contained report is on disk after every check (SKILL.md
           # § Output protocol).  So on a mid-run death (API drop / 30-min
           # cap) the file is a non-empty PARTIAL report (Status "⏳ In
@@ -522,7 +544,7 @@ jobs:
               echo ""
               echo "**Status:** 🔴 Agent did not produce a report."
               echo ""
-              echo "The Claude Code skill exited without writing /tmp/qa-report.md."
+              echo "The Claude Code skill exited without writing /tmp/qa-agent/qa-report.md."
               echo "See the workflow run log for stdout/stderr."
               echo ""
               echo "## stdout tail (last stream-json events, truncated)"
@@ -539,6 +561,14 @@ jobs:
               echo '```'
             } > /tmp/qa-report.md
           fi
+
+      - name: Collect the agent's report
+        # The agent step above already did this — but a run killed at the
+        # job timeout never reaches its next line, and its partial report
+        # (the skill rewrites it after every check) is exactly the one
+        # worth posting.  Idempotent: a report already collected is kept.
+        if: always()
+        run: python3 .github/scripts/qa_collect_report.py
 
       - name: Append run telemetry to report
         # Cost observability (ships with the --model pin above): a
@@ -559,16 +589,30 @@ jobs:
         # even a node crash — a missing footer must never block the
         # report -> artifact -> issue chain.
         #
-        # TRUST BOUNDARY: the parsed log is writable by the same OS user
-        # the agent's Bash tool runs as, so the footer is BEST-EFFORT
+        # TRUST BOUNDARY: the parsed log is outside the sandbox's writable
+        # dir, but it carries text the agent chose (its messages, the
+        # output of its commands), and on a self-hosted runner the same
+        # OS user owns it — so the footer is BEST-EFFORT
         # observability for accidental drift — the provider Console /
         # invoice remains the integrity source for cost auditing, and a
         # clean footer is never proof of a clean spend (see the script
         # header + docs/design.md § Cost).
+        #
+        # Only when there IS a report.  The script already skips an absent
+        # or empty one; the guard keeps it that way if the script changes,
+        # because appending creates the file: on a day the agent step never
+        # ran (e.g. the sandbox could not start) that would manufacture a
+        # footer-only "report" with no qa-max-severity marker, which posts
+        # UNLABELED.  With no file, post-issue's missing-report fallback
+        # posts a labeled 🔴 body instead.
         if: always()
         run: |
-          node .github/scripts/qa_run_telemetry.js /tmp/claude-stdout.log /tmp/qa-report.md \
-            || echo "telemetry footer failed non-fatally; report posts without it"
+          if [ -s /tmp/qa-report.md ]; then
+            node .github/scripts/qa_run_telemetry.js /tmp/claude-stdout.log /tmp/qa-report.md \
+              || echo "telemetry footer failed non-fatally; report posts without it"
+          else
+            echo "no report to append telemetry to; post-issue's fallback will post"
+          fi
 
       - name: Upload run artifacts
         if: always()
@@ -626,7 +670,9 @@ jobs:
         # If run-qa was cancelled before its "Upload run artifacts" step
         # ran (e.g. timeout hit, runner went offline mid-job), the
         # artifact download above is a no-op and /tmp/qa-report.md
-        # doesn't exist.  Write a synthesized 🔴 body so the issue still
+        # doesn't exist.  Same when run-qa failed before the agent step
+        # (e.g. the sandbox could not start): the artifact, if any, holds
+        # no report, because the telemetry step no longer creates one.  Write a synthesized 🔴 body so the issue still
         # posts and surfaces the upstream failure rather than going
         # silent.
         #
@@ -645,10 +691,11 @@ jobs:
               echo "<!-- qa-max-severity: critical -->"
               echo "# Morning QA — $(date -u +%F)"
               echo ""
-              echo "**Status:** 🔴 Job 1 (run-qa) produced no artifact."
+              echo "**Status:** 🔴 Job 1 (run-qa) produced no report."
               echo ""
-              echo "The run-qa job either crashed before its upload-artifact step"
-              echo "or was cancelled.  See the run-qa job log for details:"
+              echo "The run-qa job failed before the agent wrote a report (e.g. the"
+              echo "sandbox could not start), crashed before its upload-artifact"
+              echo "step, or was cancelled.  See the run-qa job log for details:"
               echo "https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
             } > /tmp/qa-report.md
           fi
