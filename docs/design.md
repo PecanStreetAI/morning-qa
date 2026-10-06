@@ -87,6 +87,14 @@ GitHub Actions wins because:
 * The CLI's tool flags enforce tier discipline **mechanically** — Tier 1 is
   a flag set (`--disallowed-tools` + `--strict-mcp-config`; the allowlist
   merely pre-approves), not a promise.
+* The CLI's built-in sandbox contains the one tool that tier flags cannot:
+  `Bash`. Every model-issued command runs under bubblewrap with the secrets
+  unset and network egress limited to an allowlist, while the CLI process
+  and the MCP server keep the access they need. A job-wide egress
+  allowlist could not do this: the job must reach `api.anthropic.com`,
+  which anyone holding their own API key can use to store data and read it
+  back. Settings: `template/.github/scripts/qa_sandbox_settings.py`. Live
+  proof: the repo's manual **Sandbox canary** workflow.
 * Promotion to Tier 2 later is an incremental change — add `Edit` and an
   auto-PR workflow step — not a re-platform.
 * Cost is bounded and observable: the model is pinned in the workflow, and

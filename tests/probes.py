@@ -47,12 +47,17 @@ RETRO_WORKFLOW = TEMPLATE / ".github/workflows/qa-ledger-retro.yml"
 CI_WORKFLOW = REPO / ".github/workflows/ci.yml"
 DEPENDABOT_CONFIG = REPO / ".github/dependabot.yml"
 REQUIREMENTS_DEV = REPO / "requirements-dev.txt"
+CANARY_WORKFLOW = REPO / ".github/workflows/sandbox-canary.yml"
 # Every workflow file whose `uses:` pins Dependabot maintains.
-ALL_WORKFLOWS = (CI_WORKFLOW, WORKFLOW, RETRO_WORKFLOW)
+ALL_WORKFLOWS = (CI_WORKFLOW, CANARY_WORKFLOW, WORKFLOW, RETRO_WORKFLOW)
 SEV_SCRIPT = TEMPLATE / ".github/scripts/qa_severity_label.sh"
 PRECOMPUTE_SCRIPT = TEMPLATE / ".github/scripts/qa_precompute.py"
 TELEMETRY_SCRIPT = TEMPLATE / ".github/scripts/qa_run_telemetry.js"
 LEDGER_SCRIPT = TEMPLATE / ".github/scripts/qa_ledger_retro.py"
+SANDBOX_SETTINGS_SCRIPT = TEMPLATE / ".github/scripts/qa_sandbox_settings.py"
+SANDBOX_PREPARE_SCRIPT = TEMPLATE / ".github/scripts/qa_sandbox_prepare.sh"
+SANDBOX_PROBES_SCRIPT = TEMPLATE / ".github/scripts/qa_sandbox_probes.sh"
+SANDBOX_CANARY_SCRIPT = TEMPLATE / ".github/scripts/qa_sandbox_canary.py"
 MCP_CONFIG = TEMPLATE / ".mcp.qa.json"
 
 SKILL = TEMPLATE / ".claude/skills/morning-qa/SKILL.md"
