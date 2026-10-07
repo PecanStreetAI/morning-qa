@@ -1,0 +1,523 @@
+<title>Operator Desk</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<style>
+/* Layout: one column console. Header + priority strip, then sessions (newest-most-urgent first), archive collapsed at the bottom. */
+:root {
+  --bg: #f5f6f8;
+  --surface: #ffffff;
+  --fg: #1b2230;
+  --muted: #5d6779;
+  --line: #dde1e8;
+  --accent: #2f5bd3;
+  --accent-fg: #ffffff;
+  --p1: #c4302b; --p1-bg: #fbe9e8;
+  --p2: #b56a00; --p2-bg: #fdf1df;
+  --p3: #2f5bd3; --p3-bg: #e8eefc;
+  --p4: #56637a; --p4-bg: #eceff4;
+  --ok: #2e7d4f; --ok-bg: #e5f3ea;
+  --banner: #fff7d6; --banner-fg: #6b5400;
+  --font-ui: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-data: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+  --bg: #12161d; --surface: #1a2029; --fg: #e4e8ef; --muted: #98a2b4; --line: #2b3340;
+  --accent: #7d9df0; --accent-fg: #0f1420;
+  --p1: #f07a74; --p1-bg: #3a1f1f; --p2: #e8a64a; --p2-bg: #382a17;
+  --p3: #7d9df0; --p3-bg: #1f2944; --p4: #a3adc0; --p4-bg: #262d39;
+  --ok: #6cc795; --ok-bg: #1b3326; --banner: #3a3216; --banner-fg: #f0dc8c;
+  color-scheme: dark } }
+:root[data-theme="dark"] {
+  --bg: #12161d; --surface: #1a2029; --fg: #e4e8ef; --muted: #98a2b4; --line: #2b3340;
+  --accent: #7d9df0; --accent-fg: #0f1420;
+  --p1: #f07a74; --p1-bg: #3a1f1f; --p2: #e8a64a; --p2-bg: #382a17;
+  --p3: #7d9df0; --p3-bg: #1f2944; --p4: #a3adc0; --p4-bg: #262d39;
+  --ok: #6cc795; --ok-bg: #1b3326; --banner: #3a3216; --banner-fg: #f0dc8c;
+  color-scheme: dark }
+
+* { box-sizing: border-box }
+body { background: var(--bg); color: var(--fg); font-family: var(--font-ui); font-size: 14px; line-height: 1.45 }
+.wrap { max-width: 980px; margin: 0 auto; padding-inline: 16px; padding-block: 0 48px; display: grid; gap: 20px }
+.mock { background: var(--banner); color: var(--banner-fg); font-size: 12.5px; padding: 6px 16px; text-align: center }
+
+header { display: flex; flex-wrap: wrap; align-items: end; justify-content: space-between; gap: 12px; padding-top: 20px }
+header h1 { margin: 0; font-size: 22px; font-weight: 600; letter-spacing: -0.01em }
+header .sub { color: var(--muted); font-size: 13px; font-family: var(--font-data) }
+.refresh { display: flex; align-items: center; gap: 10px; font-size: 12.5px; color: var(--muted) }
+button { font: inherit; cursor: pointer }
+.btn { border: 1px solid var(--line); background: var(--surface); color: var(--fg); border-radius: 6px; padding: 6px 12px; font-size: 13px; font-weight: 500 }
+.btn:hover { border-color: var(--accent) }
+.btn.primary { background: var(--accent); color: var(--accent-fg); border-color: var(--accent) }
+.btn:focus-visible, summary:focus-visible, a:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px }
+.btn[disabled] { opacity: .6; cursor: progress }
+
+.strip { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px }
+.tile { background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; display: grid; gap: 2px }
+.tile .n { font-family: var(--font-data); font-size: 22px; font-variant-numeric: tabular-nums; font-weight: 500 }
+.tile .l { font-size: 12px; color: var(--muted) }
+.tile.p1 .n { color: var(--p1) } .tile.p2 .n { color: var(--p2) } .tile.p3 .n { color: var(--p3) } .tile.p4 .n { color: var(--p4) }
+@media (max-width: 560px) { .strip { grid-template-columns: repeat(2, minmax(0, 1fr)) } }
+
+.session { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; overflow: hidden }
+.s-head { display: flex; flex-wrap: wrap; gap: 6px 12px; align-items: baseline; justify-content: space-between; padding: 12px 16px; border-bottom: 1px solid var(--line) }
+.s-title { display: flex; flex-wrap: wrap; gap: 8px; align-items: baseline; min-width: 0 }
+.s-title h2 { margin: 0; font-size: 15px; font-weight: 600 }
+.s-title a { color: var(--muted); font-family: var(--font-data); font-size: 12.5px; text-decoration: none }
+.s-title a:hover { color: var(--accent); text-decoration: underline }
+.s-meta { font-family: var(--font-data); font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums }
+.label { font-size: 11px; font-weight: 500; letter-spacing: .03em; padding: 1px 7px; border-radius: 999px; white-space: nowrap }
+.label.crit { background: var(--p1-bg); color: var(--p1) } .label.inc { background: var(--p2-bg); color: var(--p2) }
+.label.retro { background: var(--p3-bg); color: var(--p3) } .label.clean { background: var(--ok-bg); color: var(--ok) }
+
+.item { display: grid; grid-template-columns: 4px 56px minmax(0, 1fr) auto; gap: 0 12px; align-items: start; padding: 12px 16px 12px 0; border-top: 1px solid var(--line) }
+.item:first-of-type { border-top: 0 }
+.item .bar { align-self: stretch; border-radius: 0 3px 3px 0 }
+.item.p1 .bar { background: var(--p1) } .item.p2 .bar { background: var(--p2) } .item.p3 .bar { background: var(--p3) } .item.p4 .bar { background: var(--p4) }
+.prio { font-family: var(--font-data); font-size: 12px; font-weight: 500; padding: 2px 0; text-align: center; border-radius: 4px }
+.p1 .prio { background: var(--p1-bg); color: var(--p1) } .p2 .prio { background: var(--p2-bg); color: var(--p2) }
+.p3 .prio { background: var(--p3-bg); color: var(--p3) } .p4 .prio { background: var(--p4-bg); color: var(--p4) }
+.body { min-width: 0; display: grid; gap: 3px }
+.body .t { font-weight: 500 }
+.body .d { color: var(--muted); font-size: 13px; max-width: 68ch }
+.body .m { font-family: var(--font-data); font-size: 11.5px; color: var(--muted); display: flex; flex-wrap: wrap; gap: 4px 14px }
+.body .m .kind { color: var(--fg) }
+.acts { display: flex; gap: 6px; align-items: center }
+.acts a { font-size: 13px; color: var(--accent); text-decoration: none; padding: 6px 4px }
+.acts a:hover { text-decoration: underline }
+@media (max-width: 620px) {
+  .item { grid-template-columns: 4px 48px minmax(0, 1fr); row-gap: 8px }
+  .acts { grid-column: 3 }
+}
+
+.empty { background: var(--surface); border: 1px dashed var(--line); border-radius: 10px; padding: 28px; text-align: center; color: var(--muted) }
+
+details.archive { background: var(--surface); border: 1px solid var(--line); border-radius: 10px }
+details.archive summary { list-style: none; padding: 12px 16px; cursor: pointer; display: flex; justify-content: space-between; gap: 12px; font-weight: 500 }
+details.archive summary::-webkit-details-marker { display: none }
+details.archive summary .chev { color: var(--muted); font-size: 12px; transition: transform .15s }
+details.archive[open] summary .chev { transform: rotate(90deg) }
+.arch-row { display: grid; grid-template-columns: 92px minmax(0, 1fr) auto; gap: 12px; padding: 9px 16px; border-top: 1px solid var(--line); font-size: 13px; align-items: baseline }
+.arch-row .when { font-family: var(--font-data); font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums }
+.arch-row .what { min-width: 0 }
+.arch-row .what s { color: var(--muted); text-decoration-color: var(--line) }
+.arch-row .how { font-size: 12px; color: var(--ok); white-space: nowrap }
+.arch-row .sess { display: block; font-family: var(--font-data); font-size: 11.5px; color: var(--muted) }
+.arch-row button { border: 0; background: none; color: var(--accent); font-size: 12px; padding: 0 }
+@media (max-width: 560px) { .arch-row { grid-template-columns: minmax(0, 1fr) auto } .arch-row .when { grid-column: 1 / -1 } }
+
+.type { font-family: var(--font-data); font-size: 11px; color: var(--muted); border: 1px solid var(--line); border-radius: 4px; padding: 0 6px; white-space: nowrap }
+.label.blocked { background: var(--p1-bg); color: var(--p1) } .label.failed { background: var(--p2-bg); color: var(--p2) }
+.label.review { background: var(--p3-bg); color: var(--p3) } .label.idle { background: var(--p4-bg); color: var(--p4) }
+.label.overdue { background: var(--p2-bg); color: var(--p2) }
+.due { font-variant-numeric: tabular-nums }
+.due.late { color: var(--p2); font-weight: 500 }
+
+.tabs { display: flex; flex-wrap: wrap; gap: 6px; border-bottom: 1px solid var(--line); padding-bottom: 8px }
+.tab { border: 1px solid transparent; background: none; color: var(--muted); border-radius: 6px; padding: 5px 10px; font-size: 13px; font-weight: 500 }
+.tab:hover { color: var(--fg) }
+.tab[aria-selected="true"] { background: var(--surface); border-color: var(--line); color: var(--fg) }
+.tab .c { font-family: var(--font-data); font-size: 11.5px; margin-left: 4px; color: var(--muted) }
+
+form.add { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 12px 16px; display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 1fr) 150px 90px auto; gap: 8px; align-items: end }
+form.add label { display: grid; gap: 3px; font-size: 12px; color: var(--muted) }
+form.add input, form.add select { font: inherit; font-size: 13px; color: var(--fg); background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; min-width: 0; width: 100% }
+form.add .row-btns { display: flex; gap: 6px }
+@media (max-width: 720px) { form.add { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) } form.add .wide { grid-column: 1 / -1 } }
+.notice { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 12px 16px; font-size: 13px; color: var(--muted); display: grid; gap: 4px }
+.notice b { color: var(--fg); font-weight: 600 }
+.notice.warn { border-color: var(--p2) }
+.sec-err { font-size: 12.5px; color: var(--p2); padding: 8px 16px; border: 1px dashed var(--p2); border-radius: 8px; background: var(--p2-bg) }
+.btn.danger { color: var(--p1); border-color: var(--p1) }
+.btn.small { padding: 4px 9px; font-size: 12px }
+.loading { color: var(--muted); font-size: 13px; padding: 4px 2px }
+</style>
+
+<div class="wrap">
+  <header>
+    <div>
+      <h1>Operator Desk</h1>
+      <div class="sub">Claude Code sessions · project reminders · QA runs</div>
+    </div>
+    <div class="refresh">
+      <span id="stamp">Loading…</span>
+      <button class="btn" id="add-open" type="button" disabled>+ Reminder</button>
+      <button class="btn primary" id="refresh" type="button">Refresh</button>
+    </div>
+  </header>
+
+  <div id="gate" hidden></div>
+
+  <form class="add" id="add" hidden>
+    <label class="wide">Reminder<input id="r-text" required maxlength="200" placeholder="e.g. Rotate the admin API key"></label>
+    <label>Project<input id="r-proj" required maxlength="60" list="r-projects" placeholder="e.g. morning-qa"></label>
+    <datalist id="r-projects"></datalist>
+    <label>Due<input id="r-due" type="date" required></label>
+    <label>Priority<select id="r-prio"><option value="auto">Auto</option><option value="1">P1</option><option value="2">P2</option><option value="3">P3</option><option value="4">P4</option></select></label>
+    <div class="row-btns"><button class="btn primary" type="submit">Add</button><button class="btn" type="button" id="add-cancel">Cancel</button></div>
+  </form>
+
+  <section class="strip" id="strip" aria-label="Open items by priority"></section>
+  <div class="legend">
+    <span><b>P1</b> act now</span><span><b>P2</b> decide today</span><span><b>P3</b> this week</span><span><b>P4</b> when convenient</span>
+  </div>
+
+  <div class="tabs" role="tablist" id="tabs"></div>
+  <div id="src-notes" style="display:grid;gap:8px"></div>
+  <main id="sessions" style="display:grid;gap:16px"></main>
+
+  <details class="archive" id="archive">
+    <summary><span id="arch-title">Archived</span><span class="chev">▶</span></summary>
+    <div id="arch-list"></div>
+  </details>
+</div>
+<div class="toast" id="toast" role="status"></div>
+
+<script>
+"use strict";
+// Sources: Claude Code sessions are read live through the viewer's built-in
+// "Claude Code Remote" connector. Reminders, QA items, dismissals and the
+// archive live in this artifact's db (owner-only rules).
+const CC = "Claude Code Remote";
+const TYPES = { cc: "Claude Code", rem: "Reminders", qa: "QA run" };
+const STALE_DAYS = 14;          // finished sessions older than this drop off
+const ARCHIVE_SHOWN = 100;
+
+const st = {
+  owner: null, db: null, mcp: null,
+  sessions: null, sessErr: null, sessAt: null, loadingSessions: false,
+  reminders: [], qa: [], archive: [], dismissed: {},
+  dbReady: false, dbErr: null, filter: "all",
+};
+
+const $ = id => document.getElementById(id);
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const pad = n => String(n).padStart(2, "0");
+const todayISO = () => { const d = new Date(); return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`; };
+const addDays = (iso, n) => { const d = new Date(iso + "T12:00:00"); d.setDate(d.getDate() + n); return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`; };
+const dayDiff = (a, b) => Math.round((Date.parse(a + "T12:00:00") - Date.parse(b + "T12:00:00")) / 864e5);
+function ago(ts) {
+  const t = typeof ts === "number" ? ts : Date.parse(ts);
+  if (!isFinite(t)) return "";
+  const m = Math.max(0, Math.round((Date.now() - t) / 6e4));
+  if (m < 60) return `${m}m`;
+  const h = Math.round(m / 60);
+  return h < 48 ? `${h}h` : `${Math.round(h / 24)}d`;
+}
+const stamp = ts => { const d = new Date(ts); return `${pad(d.getMonth()+1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`; };
+const safeId = id => /^[A-Za-z0-9_-]{1,120}$/.test(id || "") ? id : null;
+const sessionUrl = id => safeId(id) ? `https://claude.ai/code/${id}` : null;
+const safeHttp = u => /^https:\/\/[^\s"'<>]+$/.test(u || "") ? u : null;
+
+function toast(msg) { const t = $("toast"); t.textContent = msg; t.classList.add("on"); clearTimeout(toast.h); toast.h = setTimeout(() => t.classList.remove("on"), 2600); }
+
+/* ---------- Claude Code sessions → action items ---------- */
+const NEEDS_YOU = /pending your action|awaiting (you|user|your)|needs? your|waiting (on|for) you/i;
+function sessionItems(s) {
+  if (s.session_status === "SESSION_STATUS_ARCHIVED") return [];
+  const bucket = String(s.status_bucket || "").replace("SESSION_STATUS_BUCKET_", "").toLowerCase();
+  const pts = s.post_turn_summary || s.external_metadata?.post_turn_summary || {};
+  const need = String(pts.needs_action || "").trim();
+  const detail = String(pts.status_detail || "").trim();
+  const recent = String(pts.recent_action || "").trim();
+  const base = { s: s.id, src: "cc", at: s.updated_at };
+  if (bucket === "blocked")
+    return [{ ...base, p: 1, kind: "Waiting on you", t: need || detail || "The session paused for your answer", d: need ? detail : recent }];
+  if (bucket === "failed")
+    return [{ ...base, p: 2, kind: "Last turn failed", t: detail || "The last turn ended with an error", d: "Open the session to resume it, or archive it." }];
+  if (need || NEEDS_YOU.test(detail))
+    return [{ ...base, p: 2, kind: "Needs your action", t: need || detail, d: need ? detail : recent }];
+  if (bucket === "review_ready")
+    return [{ ...base, p: 3, kind: "Ready for review", t: detail || "Work is ready for your review", d: recent }];
+  if (bucket === "completed") {
+    if ((Date.now() - Date.parse(s.updated_at)) / 864e5 > STALE_DAYS) return [];
+    return [{ ...base, p: 4, kind: "Finished", t: detail || "Finished. Archive it when you're done with it.", d: recent || "Archiving releases its container and retires this item." }];
+  }
+  return [];   // working / idle without a summary: nothing for you to do yet
+}
+function sessionGroup(s) {
+  const bucket = String(s.status_bucket || "").replace("SESSION_STATUS_BUCKET_", "").toLowerCase();
+  const lab = { blocked: ["blocked","Waiting on you"], failed: ["failed","Last turn failed"], review_ready: ["review","Ready for review"], completed: ["idle","Finished"] }[bucket];
+  const repos = (s.session_context?.sources || []).map(x => (x.git_repository?.url || "").split("/").slice(-1)[0]).filter(Boolean);
+  const branch = Object.values(s.external_metadata?.current_branches || {}).find(Boolean);
+  return {
+    id: "cc:" + s.id, type: "cc", title: s.title || "Untitled session", link: sessionUrl(s.id),
+    ref: [repos.join(", "), branch].filter(Boolean).join(" · ") || "session",
+    labels: lab ? [lab] : [], meta: `updated ${ago(s.updated_at)} ago`, recency: Date.parse(s.updated_at) || 0, sid: s.id,
+  };
+}
+
+async function loadSessions(fresh) {
+  if (!st.mcp || st.loadingSessions) return;
+  st.loadingSessions = true; render();
+  const call = () => st.mcp.callTool(CC, "list_sessions", { limit: 100, mine: true }, fresh ? { cache: { refresh: true } } : undefined);
+  try {
+    let res;
+    try { res = await call(); }
+    catch (e) {
+      if (!e?.retryable) throw e;
+      await new Promise(r => setTimeout(r, Math.min(e.retryAfterMs || 0, 8000) + 800 + Math.random() * 1200));
+      res = await call();
+    }
+    const p = res.payload || {};
+    const list = p.ccr?.data ?? p.data ?? p.sessions ?? (Array.isArray(p) ? p : null);
+    if (!Array.isArray(list)) throw { code: "shape", message: "The session list came back in a shape this page doesn't recognize." };
+    st.sessions = list; st.sessErr = null; st.sessAt = res.cache?.storedAt || Date.now();
+  } catch (e) {
+    st.sessErr = e;
+    if (["needs_reauth","server_not_connected","not_in_manifest","blocked_by_policy","not_granted","capability_disabled"].includes(e?.code)) st.sessions = null;
+  } finally { st.loadingSessions = false; render(); }
+}
+
+function sessErrText(e) {
+  switch (e?.code) {
+    case "needs_reauth": return "Claude Code access has expired. Reconnect it in claude.ai Settings → Connectors, then press Refresh.";
+    case "server_not_connected": return "Claude Code isn't connected for your account here. Open this page in claude.ai while signed in, then press Refresh.";
+    case "selection_required": return "Pick which Claude Code connector this page should use when claude.ai asks, then press Refresh.";
+    case "not_in_manifest": return "Claude Code access is turned off for this page. Turn it on from the page's Permissions menu, then press Refresh.";
+    case "blocked_by_policy": case "approval_required": return "Your organization's policy blocks this page from listing Claude Code sessions.";
+    case "server_unavailable": return "Claude Code didn't answer in time. Showing the last list; press Refresh to try again.";
+    case "tool_error": return "Claude Code reported an error: " + (e.message || "no details");
+    case "not_granted": case "capability_disabled": case "capability_removed": return "This view can't reach your connectors. Open the page in claude.ai to see sessions.";
+    default: return (e?.message || "Couldn't load sessions.") + (e?.code ? ` (${e.code})` : "");
+  }
+}
+
+/* ---------- reminders ---------- */
+function remPrio(r) {
+  if (r.prio) return r.prio;
+  const n = dayDiff(r.due, todayISO());
+  return n <= 0 ? 2 : n <= 7 ? 3 : 4;
+}
+function dueText(due) {
+  const n = dayDiff(due, todayISO());
+  if (n < 0) return `<span class="due late">overdue ${-n}d</span>`;
+  if (n === 0) return `<span class="due late">due today</span>`;
+  return `<span class="due">due ${esc(due.slice(5))} (${n}d)</span>`;
+}
+
+/* ---------- build the view ---------- */
+function collect() {
+  const groups = [];
+  if (st.sessions) {
+    for (const s of st.sessions) {
+      const d = st.dismissed[s.id];
+      if (d && d.updatedAt === s.updated_at) continue;     // marked done; new activity brings it back
+      const its = sessionItems(s);
+      if (its.length) groups.push({ ...sessionGroup(s), its });
+    }
+  }
+  const byProj = {};
+  for (const r of st.reminders) {
+    const g = byProj[r.project] ||= { id: "rem:" + r.project, type: "rem", title: r.project, link: null, ref: "project", labels: [], its: [], recency: 0 };
+    g.its.push({ id: r.id, src: "rem", p: remPrio(r), kind: "Reminder", t: r.text, d: r.note || "", due: r.due });
+  }
+  for (const g of Object.values(byProj)) {
+    if (g.its.some(i => dayDiff(i.due, todayISO()) < 0)) g.labels = [["overdue","Overdue"]];
+    g.meta = `${g.its.length} open reminder${g.its.length > 1 ? "s" : ""}`;
+    g.recency = -Math.min(...g.its.map(i => Date.parse(i.due)));   // sooner due = more urgent
+    groups.push(g);
+  }
+  const byRun = {};
+  for (const q of st.qa) {
+    const key = q.sessionId || "qa";
+    const g = byRun[key] ||= { id: "qa:" + key, type: "qa", title: q.sessionTitle || "QA run", link: safeHttp(q.sessionUrl), ref: q.sessionRef || "", labels: q.sessionLabel ? [[q.sessionLabelKind || "crit", q.sessionLabel]] : [], meta: q.sessionMeta || "", its: [], recency: 0 };
+    g.its.push({ id: q.id, src: "qa", p: Math.min(4, Math.max(1, +q.p || 3)), kind: q.kind || "Action", t: q.title, d: q.detail || "", at: q.openedAt });
+    g.recency = Math.max(g.recency, Date.parse(q.openedAt) || 0);
+  }
+  groups.push(...Object.values(byRun));
+  for (const g of groups) g.its.sort((a, b) => a.p - b.p || String(a.due || "").localeCompare(String(b.due || "")));
+  return groups;
+}
+
+function render() {
+  const groups = collect();
+  const all = groups.flatMap(g => g.its);
+  const names = ["Act now", "Decide today", "This week", "When convenient"];
+  $("strip").innerHTML = [1,2,3,4].map(p =>
+    `<div class="tile p${p}"><span class="n">${all.filter(i => i.p === p).length}</span><span class="l">P${p} · ${names[p-1]}</span></div>`).join("");
+
+  const count = t => groups.filter(g => t === "all" || g.type === t).reduce((n, g) => n + g.its.length, 0);
+  $("tabs").innerHTML = ["all","cc","rem","qa"].map(t =>
+    `<button class="tab" role="tab" type="button" data-tab="${t}" aria-selected="${st.filter === t}">${t === "all" ? "All" : TYPES[t]}<span class="c">${count(t)}</span></button>`).join("");
+
+  // Per-source status notes, shown only when they explain something.
+  const notes = [];
+  const showCc = st.filter === "all" || st.filter === "cc";
+  if (showCc && st.sessErr) notes.push(`<div class="sec-err">${esc(sessErrText(st.sessErr))}</div>`);
+  if (showCc && st.loadingSessions && !st.sessions) notes.push(`<div class="loading">Loading Claude Code sessions…</div>`);
+  if (st.dbErr) notes.push(`<div class="sec-err">${esc(st.dbErr)}</div>`);
+  if (st.filter === "qa" && !st.qa.length && st.dbReady)
+    notes.push(`<div class="notice"><b>No QA items yet.</b><span>QA runs live in GitHub, which this page can't reach on its own. Ask Claude to load the latest morning-report issues here, or set up a scheduled routine to do it daily.</span></div>`);
+  if (st.filter === "rem" && !st.reminders.length && st.dbReady)
+    notes.push(`<div class="notice"><b>No reminders.</b><span>Press + Reminder to add one. Each reminder belongs to a project and its due date sets its priority.</span></div>`);
+  $("src-notes").innerHTML = notes.join("");
+
+  const shown = groups.filter(g => st.filter === "all" || g.type === st.filter)
+    .sort((a, b) => a.its[0].p - b.its[0].p || b.recency - a.recency);
+
+  $("sessions").innerHTML = shown.length ? shown.map(g => `
+    <section class="session" aria-label="${esc(g.title)}">
+      <div class="s-head">
+        <div class="s-title"><span class="type">${TYPES[g.type]}</span><h2>${esc(g.title)}</h2>
+          ${g.link ? `<a href="${esc(g.link)}" target="_blank" rel="noopener">${esc(g.ref || "open")}</a>` : `<span class="s-meta">${esc(g.ref)}</span>`}
+          ${g.labels.map(([c, l]) => `<span class="label ${esc(c)}">${esc(l)}</span>`).join("")}</div>
+        <div class="s-meta">${esc(g.meta)}</div>
+      </div>
+      ${g.its.map(i => `
+        <div class="item p${i.p}">
+          <span class="bar"></span>
+          <span class="prio">P${i.p}</span>
+          <div class="body">
+            <span class="t">${esc(i.t)}</span>
+            ${i.d ? `<span class="d">${esc(i.d)}</span>` : ""}
+            <span class="m"><span class="kind">${esc(i.kind)}</span>${i.due ? dueText(i.due) : i.at ? `<span>${esc(ago(i.at))} ago</span>` : ""}</span>
+          </div>
+          <div class="acts">
+            ${g.link ? `<a href="${esc(g.link)}" target="_blank" rel="noopener">Open</a>` : ""}
+            ${i.src === "cc" ? `<button class="btn small" type="button" data-archive-session="${esc(i.s)}">Archive session</button>` : ""}
+            <button class="btn small" type="button" data-done="${esc(i.src)}:${esc(i.src === "cc" ? i.s : i.id)}" ${st.db ? "" : "disabled"}>Mark done</button>
+          </div>
+        </div>`).join("")}
+    </section>`).join("")
+    : (st.dbReady || st.sessions) ? `<div class="empty">Nothing waiting on you here. Press Refresh to check again.</div>` : "";
+
+  // Archive: what you marked done (db) plus Claude sessions archived recently (live).
+  const rows = st.archive.map(a => ({ when: a.at, t: a.title, sess: a.group, how: a.how, id: a.id, restorable: !!a.restore }));
+  for (const s of st.sessions || []) {
+    if (s.session_status !== "SESSION_STATUS_ARCHIVED") continue;
+    if ((Date.now() - Date.parse(s.updated_at)) / 864e5 > STALE_DAYS) continue;
+    rows.push({ when: Date.parse(s.updated_at), t: s.title || "Untitled session", sess: "Claude Code", how: "Session archived" });
+  }
+  rows.sort((a, b) => b.when - a.when);
+  $("arch-title").textContent = `Archived (${rows.length})`;
+  $("arch-list").innerHTML = rows.length ? rows.map(a => `
+    <div class="arch-row">
+      <span class="when">${esc(stamp(a.when))}</span>
+      <span class="what"><s>${esc(a.t)}</s><span class="sess">${esc(a.sess)}</span></span>
+      <span class="how">✓ ${esc(a.how)}${a.restorable && st.db ? ` · <button type="button" data-restore="${esc(a.id)}">Restore</button>` : ""}</span>
+    </div>`).join("") : `<div class="arch-row"><span class="when"></span><span class="what">Nothing archived yet.</span><span></span></div>`;
+
+  $("stamp").textContent = st.loadingSessions ? "Refreshing…" : st.sessAt ? `Sessions as of ${stamp(st.sessAt)}` : "";
+  $("refresh").disabled = st.loadingSessions;
+  $("refresh").textContent = st.loadingSessions ? "Refreshing…" : "Refresh";
+  $("add-open").disabled = !st.db;
+  $("r-projects").innerHTML = [...new Set(st.reminders.map(r => r.project))].map(p => `<option value="${esc(p)}">`).join("");
+}
+
+/* ---------- actions ---------- */
+async function archiveEntry(entry) {
+  await st.db.collection("archive").add({ ...entry, at: Date.now() });
+}
+async function markDone(key) {
+  const [src, ...rest] = key.split(":"); const id = rest.join(":");
+  try {
+    if (src === "cc") {
+      const s = (st.sessions || []).find(x => x.id === id); if (!s) return;
+      const it = sessionItems(s)[0];
+      await st.db.doc("dismissed/" + id).set({ updatedAt: s.updated_at });
+      await archiveEntry({ title: it?.t || s.title, group: `Claude Code · ${s.title || "session"}`, how: "Marked done",
+        restore: { op: "delete", path: "dismissed/" + id } });
+    } else if (src === "rem") {
+      const r = st.reminders.find(x => x.id === id); if (!r) return;
+      const { id: _drop, ...data } = r;
+      await archiveEntry({ title: r.text, group: `Reminders · ${r.project}`, how: "Marked done",
+        restore: { op: "set", path: "reminders/" + id, data } });
+      await st.db.doc("reminders/" + id).delete();
+    } else if (src === "qa") {
+      const q = st.qa.find(x => x.id === id); if (!q) return;
+      const { id: _drop, ...data } = q;
+      await archiveEntry({ title: q.title, group: `QA run · ${q.sessionTitle || ""}`, how: "Marked done",
+        restore: { op: "set", path: "qa_items/" + id, data } });
+      await st.db.doc("qa_items/" + id).delete();
+    }
+    toast("Moved to archive");
+  } catch (e) { toast(dbErrText(e)); }
+}
+async function restore(archId) {
+  const a = st.archive.find(x => x.id === archId); if (!a?.restore) return;
+  try {
+    const { op, path, data } = a.restore;
+    if (op === "delete") await st.db.doc(path).delete(); else await st.db.doc(path).set(data);
+    await st.db.doc("archive/" + archId).delete();
+    toast("Restored");
+  } catch (e) { toast(dbErrText(e)); }
+}
+const armed = {};
+async function archiveSession(btn, id) {
+  if (!armed[id]) {
+    armed[id] = setTimeout(() => { delete armed[id]; btn.textContent = "Archive session"; btn.classList.remove("danger"); }, 4000);
+    btn.textContent = "Confirm archive"; btn.classList.add("danger"); return;
+  }
+  clearTimeout(armed[id]); delete armed[id];
+  btn.disabled = true; btn.textContent = "Archiving…";
+  try {
+    await st.mcp.callTool(CC, "archive_session", { session_id: id });
+    toast("Session archived");
+    await loadSessions(true);
+  } catch (e) {
+    btn.disabled = false; btn.textContent = "Archive session"; btn.classList.remove("danger");
+    toast(e?.code === "not_in_manifest" ? "Archiving is turned off for this page. Turn it on in the Permissions menu."
+      : e?.code === "tool_error" ? "Claude Code refused: " + (e.message || "no details")
+      : "Couldn't confirm the archive. Press Refresh to check before trying again.");
+  }
+}
+function dbErrText(e) {
+  if (e?.code === "quota_exceeded") return "The dashboard's storage is full. Restore or clear old archive entries.";
+  if (e?.code === "invalid_argument") return "Only the dashboard's owner can change it.";
+  return "Couldn't save. Try again in a moment.";
+}
+
+document.addEventListener("click", e => {
+  const tab = e.target.closest("[data-tab]");
+  if (tab) { st.filter = tab.dataset.tab; render(); return; }
+  const done = e.target.closest("[data-done]");
+  if (done) { done.disabled = true; markDone(done.dataset.done); return; }
+  const rs = e.target.closest("[data-restore]");
+  if (rs) { rs.disabled = true; restore(rs.dataset.restore); return; }
+  const ar = e.target.closest("[data-archive-session]");
+  if (ar && st.mcp) archiveSession(ar, ar.dataset.archiveSession);
+});
+$("refresh").addEventListener("click", () => loadSessions(true));
+$("add-open").addEventListener("click", () => { $("add").hidden = false; $("r-due").value = addDays(todayISO(), 3); $("r-text").focus(); });
+$("add-cancel").addEventListener("click", () => { $("add").hidden = true; });
+$("add").addEventListener("submit", async e => {
+  e.preventDefault();
+  const text = $("r-text").value.trim(), project = $("r-proj").value.trim();
+  if (!text || !project || !st.db) return;
+  const p = $("r-prio").value;
+  try {
+    await st.db.collection("reminders").add({ text, project, due: $("r-due").value || todayISO(), prio: p === "auto" ? null : +p, createdAt: Date.now() });
+    $("add").reset(); $("add").hidden = true; toast("Reminder added");
+  } catch (err) { toast(dbErrText(err)); }
+});
+
+/* ---------- boot ---------- */
+render();
+(async () => {
+  const user = window.claude ? await claude.use("user") : null;
+  st.owner = user ? user.isOwner() : null;
+  if (st.owner === false) {
+    $("gate").hidden = false;
+    $("gate").innerHTML = `<div class="notice warn"><b>This dashboard belongs to its owner.</b><span>You can see the layout, but its reminders and sessions are private to the owner's account.</span></div>`;
+  }
+  const [db, mcp] = await Promise.all([window.claude ? claude.use("db") : null, window.claude ? claude.use("mcp") : null]);
+  st.db = db; st.mcp = mcp;
+  if (!mcp) st.sessErr = { code: "not_granted" };
+  if (db) {
+    const fail = e => { st.dbErr = e?.code === "revoked" ? "Access to saved reminders ended. Reload the page." : "Saved reminders couldn't load. Reload the page to try again."; render(); };
+    const rows = snap => snap.docs.map(d => ({ id: d.id, ...d.data() }));
+    db.collection("reminders").onSnapshot(s => { st.reminders = rows(s).filter(r => r.text && r.project && /^\d{4}-\d\d-\d\d$/.test(r.due || "")); st.dbReady = true; render(); }, fail);
+    db.collection("qa_items").onSnapshot(s => { st.qa = rows(s).filter(q => q.title); render(); }, fail);
+    db.collection("dismissed").onSnapshot(s => { st.dismissed = Object.fromEntries(s.docs.map(d => [d.id, d.data()])); render(); }, fail);
+    db.collection("archive").orderBy("at", "desc").limit(ARCHIVE_SHOWN).onSnapshot(s => { st.archive = rows(s); render(); }, fail);
+  } else {
+    st.dbErr = "Saved reminders aren't available in this view. Open the page in claude.ai while signed in.";
+  }
+  render();
+  if (mcp && st.owner !== false) loadSessions(false);
+})();
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden && st.sessAt && Date.now() - st.sessAt > 10 * 60e3) loadSessions(true);
+});
+</script>
